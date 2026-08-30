@@ -1,19 +1,48 @@
-# ibsend
+<div align="center">
+  <img src="docs/assets/ibsend-mark.svg" width="104" alt="ibsend 标志">
+  <h1>ibsend</h1>
+  <p><strong>跑满 InfiniBand 链路的点对点文件传输工具。</strong></p>
+  <p>一条 RC 队列对，零 TCP，接收端 CPU 不经过数据载荷路径。</p>
+  <p>
+    <a href="https://github.com/HiroGitea/ibsend/stargazers"><img alt="GitHub Stars" src="https://img.shields.io/github/stars/HiroGitea/ibsend?style=flat&logo=github"></a>
+    <a href="https://github.com/HiroGitea/ibsend/actions/workflows/build.yml"><img alt="自动构建状态" src="https://github.com/HiroGitea/ibsend/actions/workflows/build.yml/badge.svg?branch=master"></a>
+    <img alt="平台：Linux" src="https://img.shields.io/badge/platform-Linux-FCC624?logo=linux&logoColor=black">
+    <img alt="Rust 2021" src="https://img.shields.io/badge/Rust-2021-CE412B?logo=rust&logoColor=white">
+    <img alt="RDMA：InfiniBand 与 RoCE" src="https://img.shields.io/badge/RDMA-InfiniBand%20%7C%20RoCE-7C3AED">
+    <a href="#许可证"><img alt="许可证：MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue"></a>
+  </p>
+  <p><a href="README.md">English</a> · <strong>简体中文</strong> · <a href="README.ja.md">日本語</a></p>
+</div>
 
-[English](README.md) · **简体中文** · [日本語](README.ja.md)
+> [!IMPORTANT]
+> ibsend 不提供加密和对端身份验证，只适合受信任的私有 RDMA 网络。部署前请先阅读
+> [已知边界](#已知边界)。
 
-InfiniBand 点对点文件传输。控制面和数据面都在同一条 RC 队列对上，全程没有 TCP。
+## 为什么选择 ibsend？
 
-- **接收端的 CPU 不碰数据**。数据经 `RDMA_WRITE_WITH_IMM` 直接落进注册内存。
-- **RAM 暂存**。接收端先把数据接进一大块注册内存，落盘线程按磁盘自己的节奏
-  排空。磁盘跟不上时，发送端照样以线速跑完。
-- **防火墙管不着**。IPoIB 在内核眼里就是普通网卡，走 TCP 要过完整的 netfilter；
-  而 RDMA 完全绕开内核网络栈。
+| | 能力 | 带来的价值 |
+|---|---|---|
+| ⚡ | **RDMA 直通数据路径** | `RDMA_WRITE_WITH_IMM` 把数据直接写进注册内存；控制面和数据面共用一条 RC 队列对。 |
+| 🧠 | **RAM 暂存** | 自适应大内存池吞下链路与磁盘的速度差，接收端异步落盘，发送端仍能以线速完成。 |
+| 🔁 | **断点续传与校验** | 中断的 `.part` 文件按字节续传，每个已传文件都通过硬件加速的 CRC32C 校验。 |
+| 🔄 | **对等节点** | 同一个可发现的守护进程既能收也能发，支持目录树；可选的拖拽 GUI 复用同一套核心。 |
 
-每个节点都是对等的：都跑同一个守护、都能被发现、都能收发。图形界面只是同一个
-守护的另一个前端。
+<p align="center">
+  <img src="docs/assets/architecture.svg" width="900" alt="ibsend 数据路径：文件经过注册内存和一条 RC 队列对进入接收端 RAM，再异步写入磁盘">
+</p>
 
-> **说明：** 命令行和界面的提示目前只有中文，文档提供英文、中文、日文三份。
+### 性能一览
+
+在双端口 40 Gb QDR 网卡上，ibsend 持续达到 **3.47 GB/s（27.8 Gb/s）**，相当于
+编码后链路数据率的 87%，也已触及 PCIe 2.0 x8 的实际上限。即使 ZFS 目标盘只有
+831 MB/s，RAM 暂存仍让发送端在 **0.62 秒**内完成 2 GB 传输。测试环境和完整数据见
+[实测](#实测)。
+
+**快速导航：** [快速上手](#快速上手) · [命令](#命令) ·
+[工作原理](#工作原理) · [实测](#实测) · [已知边界](#已知边界) ·
+[参与贡献](CONTRIBUTING.md)
+
+> **语言说明：** 命令行和界面的提示目前只有中文，文档提供英文、中文、日文三份。
 
 ## 先决条件
 
@@ -23,14 +52,20 @@ InfiniBand 点对点文件传输。控制面和数据面都在同一条 RC 队�
 - Linux，以及较新的 Rust 工具链。
 - 锁定内存的权限，见 [内存锁定](#内存锁定)。
 
-## 构建
+## 构建与安装
 
 ```sh
-cargo build --release                    # 只要命令行
-cargo build --release --features gui     # 命令行 + 图形界面（引入 eframe）
+git clone https://github.com/HiroGitea/ibsend.git
+cd ibsend
+
+cargo install --path . --locked                    # 只安装命令行
+cargo install --path . --locked --features gui     # 命令行 + 图形界面
 ```
 
 图形界面放在 feature 后面是有意的：无头节点不该背上 OpenGL 那一整套依赖。
+
+开发时可把 `cargo install --path . --locked` 换成 `cargo build`。安装完成后请确认
+`$HOME/.cargo/bin` 已加入 `PATH`。
 
 ## 快速上手
 
@@ -245,6 +280,11 @@ ICRC 和 VCRC，RC 还有硬件重传，所以数据在网线上被改坏这件�
 - 无加密、无鉴权，假定 IB 子网是可信的私有网络。顺带一提，RDMA 流量也没法用
   `iptables` 过滤——它的访问控制在 rkey、分区键和子网管理器那里。
 - 跳过判断只比较文件大小，不看内容。
+
+## 参与贡献
+
+欢迎提交问题、改进文档或发起目标明确的 Pull Request。开发环境、检查命令以及
+性能报告所需的硬件信息见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 许可证
 

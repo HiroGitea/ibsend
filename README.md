@@ -1,24 +1,49 @@
-# ibsend
+<div align="center">
+  <img src="docs/assets/ibsend-mark.svg" width="104" alt="ibsend logo">
+  <h1>ibsend</h1>
+  <p><strong>Wire-speed peer-to-peer file transfer over InfiniBand.</strong></p>
+  <p>One RC queue pair. Zero TCP. No receiver CPU on the payload path.</p>
+  <p>
+    <a href="https://github.com/HiroGitea/ibsend/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/HiroGitea/ibsend?style=flat&logo=github"></a>
+    <a href="https://github.com/HiroGitea/ibsend/actions/workflows/build.yml"><img alt="Build status" src="https://github.com/HiroGitea/ibsend/actions/workflows/build.yml/badge.svg?branch=master"></a>
+    <img alt="Platform: Linux" src="https://img.shields.io/badge/platform-Linux-FCC624?logo=linux&logoColor=black">
+    <img alt="Built with Rust" src="https://img.shields.io/badge/Rust-2021-CE412B?logo=rust&logoColor=white">
+    <img alt="RDMA: InfiniBand and RoCE" src="https://img.shields.io/badge/RDMA-InfiniBand%20%7C%20RoCE-7C3AED">
+    <a href="#license"><img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue"></a>
+  </p>
+  <p><strong>English</strong> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a></p>
+</div>
 
-**English** · [简体中文](README.zh-CN.md) · [日本語](README.ja.md)
+> [!IMPORTANT]
+> ibsend has no encryption or peer authentication. It is designed for trusted,
+> private RDMA fabrics; see [Limitations](#limitations) before deployment.
 
-Peer-to-peer file transfer over InfiniBand. Both the control plane and the data
-plane ride a single RC queue pair — there is no TCP anywhere in the path.
+## Why ibsend?
 
-- **The receiver's CPU never touches the payload.** Data arrives by
-  `RDMA_WRITE_WITH_IMM` straight into registered memory.
-- **RAM staging.** The receiver lands data in a large registered pool and a
-  writer thread drains it to disk at whatever pace the disk manages. The sender
-  finishes at line rate even when the disk cannot keep up.
-- **Firewalls cannot get in the way.** IPoIB is an ordinary NIC as far as the
-  kernel is concerned, so TCP would traverse the full netfilter path — but RDMA
-  bypasses the kernel network stack entirely.
+| | Capability | What it means |
+|---|---|---|
+| ⚡ | **Direct RDMA data path** | `RDMA_WRITE_WITH_IMM` lands data directly in registered memory; control and data share one RC queue pair. |
+| 🧠 | **RAM staging** | A large adaptive pool absorbs the disk-speed gap, letting the sender finish at link rate while the receiver drains asynchronously. |
+| 🔁 | **Resume and verify** | Interrupted `.part` files resume byte-for-byte; every transferred file is checked with hardware-accelerated CRC32C. |
+| 🔄 | **Symmetric peers** | The same discoverable daemon sends and receives files or directory trees; an optional drag-and-drop GUI uses the same core. |
 
-Every node is symmetric: each runs the same daemon, is discoverable, and can
-both send and receive. A GUI is available but is only another front end over
-the same daemon.
+<p align="center">
+  <img src="docs/assets/architecture.svg" width="900" alt="ibsend data path: files pass through registered memory and one RC queue pair into receiver RAM, then drain to disk">
+</p>
 
-> **Note:** the CLI and GUI messages are currently Chinese only. The
+### Performance at a glance
+
+On dual-port 40 Gb QDR HCAs, ibsend sustained **3.47 GB/s (27.8 Gb/s)** — 87%
+of the encoded link data rate and the practical PCIe 2.0 x8 ceiling. With a
+slower 831 MB/s ZFS target, RAM staging still let the sender complete a 2 GB
+transfer in **0.62 s**. See the reproducible setup and full results in
+[Measured](#measured).
+
+**Jump to:** [Quick start](#quick-start) · [Commands](#commands) ·
+[How it works](#how-it-works) · [Measured](#measured) ·
+[Limitations](#limitations) · [Contributing](CONTRIBUTING.md)
+
+> **Language note:** CLI and GUI messages are currently Chinese only. The
 > documentation is available in English, Chinese and Japanese.
 
 ## Requirements
@@ -29,15 +54,21 @@ the same daemon.
 - Linux and a recent Rust toolchain.
 - Permission to lock memory — see [Memory locking](#memory-locking).
 
-## Build
+## Build and install
 
 ```sh
-cargo build --release                    # CLI only
-cargo build --release --features gui     # CLI + GUI (pulls in eframe)
+git clone https://github.com/HiroGitea/ibsend.git
+cd ibsend
+
+cargo install --path . --locked                    # CLI only
+cargo install --path . --locked --features gui     # CLI + GUI
 ```
 
 The GUI is behind a feature flag on purpose: headless nodes should not have to
 carry the OpenGL dependency chain.
+
+For development builds, replace `cargo install --path . --locked` with
+`cargo build`. After installation, make sure `$HOME/.cargo/bin` is on `PATH`.
 
 ## Quick start
 
@@ -289,6 +320,12 @@ defeat the point of resuming. The output says so explicitly.
   either — its access control lives in the rkey, the partition key and the
   subnet manager.
 - Skip detection compares file size only, not content.
+
+## Contributing
+
+Bug reports, documentation improvements and focused pull requests are welcome.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup, verification
+commands and the hardware details to include in performance reports.
 
 ## License
 

@@ -1,0 +1,57 @@
+name: Build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Linux · CLI + GUI
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install RDMA and desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libibverbs-dev \
+            librdmacm-dev \
+            libwayland-dev \
+            libxkbcommon-dev
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build data
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Build release binaries
+        run: cargo build --locked --release --features gui
+
+      - name: Upload Linux binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: ibsend-linux-x86_64
+          if-no-files-found: error
+          path: |
+            target/release/ibsend
+            target/release/ibsend-gui
+            README.md
+            README.zh-CN.md
+            README.ja.md
+            LICENSE-MIT
+            LICENSE-APACHE

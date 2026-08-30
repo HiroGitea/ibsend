@@ -1,23 +1,48 @@
-# ibsend
+<div align="center">
+  <img src="docs/assets/ibsend-mark.svg" width="104" alt="ibsend ロゴ">
+  <h1>ibsend</h1>
+  <p><strong>InfiniBand のリンク速度を活かすピアツーピアファイル転送。</strong></p>
+  <p>RC キューペアは一つ。TCP はゼロ。受信 CPU をペイロード経路から排除。</p>
+  <p>
+    <a href="https://github.com/HiroGitea/ibsend/stargazers"><img alt="GitHub Stars" src="https://img.shields.io/github/stars/HiroGitea/ibsend?style=flat&logo=github"></a>
+    <a href="https://github.com/HiroGitea/ibsend/actions/workflows/build.yml"><img alt="ビルド状態" src="https://github.com/HiroGitea/ibsend/actions/workflows/build.yml/badge.svg?branch=master"></a>
+    <img alt="プラットフォーム：Linux" src="https://img.shields.io/badge/platform-Linux-FCC624?logo=linux&logoColor=black">
+    <img alt="Rust 2021" src="https://img.shields.io/badge/Rust-2021-CE412B?logo=rust&logoColor=white">
+    <img alt="RDMA：InfiniBand と RoCE" src="https://img.shields.io/badge/RDMA-InfiniBand%20%7C%20RoCE-7C3AED">
+    <a href="#ライセンス"><img alt="ライセンス：MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue"></a>
+  </p>
+  <p><a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <strong>日本語</strong></p>
+</div>
 
-[English](README.md) · [简体中文](README.zh-CN.md) · **日本語**
+> [!IMPORTANT]
+> ibsend は暗号化もピア認証も提供しません。信頼できるプライベート RDMA
+> ファブリック向けです。導入前に[既知の制限](#既知の制限)を確認してください。
 
-InfiniBand によるピアツーピアのファイル転送。制御プレーンもデータプレーンも
-単一の RC キューペア上を通り、経路のどこにも TCP を使いません。
+## ibsend を選ぶ理由
 
-- **受信側の CPU はペイロードに触れません。** データは
-  `RDMA_WRITE_WITH_IMM` で登録済みメモリへ直接届きます。
-- **RAM ステージング。** 受信側はまず大きな登録済みプールにデータを受け、
-  書き込みスレッドがディスクの速度に合わせて排出します。ディスクが追いつか
-  なくても送信側はリンク速度で完走します。
-- **ファイアウォールが介入できません。** IPoIB はカーネルから見れば普通の NIC
-  なので TCP なら netfilter を通りますが、RDMA はカーネルのネットワーク
-  スタックを完全に迂回します。
+| | 機能 | 得られるもの |
+|---|---|---|
+| ⚡ | **RDMA の直接データパス** | `RDMA_WRITE_WITH_IMM` が登録済みメモリへ直接書き込み、制御とデータは一つの RC キューペアを共有します。 |
+| 🧠 | **RAM ステージング** | 自動調整される大きなプールがリンクとディスクの速度差を吸収し、受信側が非同期に排出する間も送信側はリンク速度で完走できます。 |
+| 🔁 | **再開と検証** | 中断した `.part` ファイルをバイト単位で再開し、転送ファイルをハードウェア支援の CRC32C で検証します。 |
+| 🔄 | **対等なピア** | 発見可能な同じデーモンがファイルやディレクトリツリーを送受信し、任意のドラッグ＆ドロップ GUI も同じコアを使います。 |
 
-各ノードは対等です。どれも同じデーモンを動かし、発見され、送受信の両方が
-できます。GUI もありますが、同じデーモンの別のフロントエンドにすぎません。
+<p align="center">
+  <img src="docs/assets/architecture.svg" width="900" alt="ibsend のデータパス：ファイルは登録済みメモリと一つの RC キューペアを通って受信側 RAM に入り、ディスクへ排出される">
+</p>
 
-> **注意：** CLI と GUI のメッセージは現在中国語のみです。この README を含む
+### パフォーマンス概要
+
+デュアルポート 40 Gb QDR HCA で **3.47 GB/s（27.8 Gb/s）**を持続しました。
+これは符号化後のリンクデータレートの 87% で、PCIe 2.0 x8 の実用上限にも達して
+います。書き込み先の ZFS が 831 MB/s でも、RAM ステージングにより送信側は 2 GB
+を **0.62 秒**で完了しました。環境と全結果は[実測](#実測)を参照してください。
+
+**クイックナビ：** [クイックスタート](#クイックスタート) ·
+[コマンド](#コマンド) · [仕組み](#仕組み) · [実測](#実測) ·
+[既知の制限](#既知の制限) · [コントリビューション](CONTRIBUTING.md)
+
+> **言語について：** CLI と GUI のメッセージは現在中国語のみです。
 > ドキュメントは英語・中国語・日本語で提供しています。
 
 ## 必要なもの
@@ -28,15 +53,22 @@ InfiniBand によるピアツーピアのファイル転送。制御プレーン
 - Linux と比較的新しい Rust ツールチェイン。
 - メモリをロックする権限（[メモリロック](#メモリロック)を参照）。
 
-## ビルド
+## ビルドとインストール
 
 ```sh
-cargo build --release                    # CLI のみ
-cargo build --release --features gui     # CLI + GUI（eframe を取り込みます）
+git clone https://github.com/HiroGitea/ibsend.git
+cd ibsend
+
+cargo install --path . --locked                    # CLI のみ
+cargo install --path . --locked --features gui     # CLI + GUI
 ```
 
 GUI を feature の後ろに置いたのは意図的です。ヘッドレスのノードに OpenGL の
 依存関係一式を背負わせる理由はありません。
+
+開発ビルドでは `cargo install --path . --locked` の代わりに `cargo build` を
+使えます。インストール後は `$HOME/.cargo/bin` が `PATH` に含まれることを確認して
+ください。
 
 ## クイックスタート
 
@@ -281,6 +313,12 @@ MTU 65520、PCIe 2.0 x8。送信側はローリングリリースの Linux、受
   フィルタできません。そのアクセス制御は rkey、パーティションキー、サブネット
   マネージャ側にあります。
 - スキップ判定はファイルサイズのみを比較し、内容は見ません。
+
+## コントリビューション
+
+バグ報告、ドキュメント改善、焦点を絞った Pull Request を歓迎します。開発環境、
+確認コマンド、性能報告に含めるハードウェア情報は
+[CONTRIBUTING.md](CONTRIBUTING.md)を参照してください。
 
 ## ライセンス
 

@@ -6,7 +6,7 @@ license = "MIT OR Apache-2.0"
 description = "Peer-to-peer file transfer over InfiniBand: control and data planes on a single RC queue pair, no TCP anywhere"
 repository = "https://github.com/HiroGitea/ibsend"
 readme = "README.md"
-keywords = ["rdma", "infiniband", "file-transfer", "ibverbs"]
+keywords = ["rdma", "infiniband", "file-transfer", "ibverbs", "zero-copy"]
 categories = ["command-line-utilities", "network-programming"]
 
 [features]
