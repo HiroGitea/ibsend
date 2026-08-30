@@ -11,7 +11,7 @@
     <img alt="RDMA: InfiniBand and RoCE" src="https://img.shields.io/badge/RDMA-InfiniBand%20%7C%20RoCE-7C3AED">
     <a href="#license"><img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue"></a>
   </p>
-  <p><strong>English</strong> · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a></p>
+  <p><strong>English</strong> · <a href="docs/README.zh-CN.md">简体中文</a> · <a href="docs/README.ja.md">日本語</a></p>
 </div>
 
 > [!IMPORTANT]

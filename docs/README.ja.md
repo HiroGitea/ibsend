@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="docs/assets/ibsend-mark.svg" width="104" alt="ibsend ロゴ">
+  <img src="assets/ibsend-mark.svg" width="104" alt="ibsend ロゴ">
   <h1>ibsend</h1>
   <p><strong>InfiniBand のリンク速度を活かすピアツーピアファイル転送。</strong></p>
   <p>RC キューペアは一つ。TCP はゼロ。受信 CPU をペイロード経路から排除。</p>
@@ -11,7 +11,7 @@
     <img alt="RDMA：InfiniBand と RoCE" src="https://img.shields.io/badge/RDMA-InfiniBand%20%7C%20RoCE-7C3AED">
     <a href="#ライセンス"><img alt="ライセンス：MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue"></a>
   </p>
-  <p><a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <strong>日本語</strong></p>
+  <p><a href="../README.md">English</a> · <a href="README.zh-CN.md">简体中文</a> · <strong>日本語</strong></p>
 </div>
 
 > [!IMPORTANT]
@@ -28,7 +28,7 @@
 | 🔄 | **対等なピア** | 発見可能な同じデーモンがファイルやディレクトリツリーを送受信し、任意のドラッグ＆ドロップ GUI も同じコアを使います。 |
 
 <p align="center">
-  <img src="docs/assets/architecture.svg" width="900" alt="ibsend のデータパス：ファイルは登録済みメモリと一つの RC キューペアを通って受信側 RAM に入り、ディスクへ排出される">
+  <img src="assets/architecture.svg" width="900" alt="ibsend のデータパス：ファイルは登録済みメモリと一つの RC キューペアを通って受信側 RAM に入り、ディスクへ排出される">
 </p>
 
 ### パフォーマンス概要
@@ -40,7 +40,7 @@
 
 **クイックナビ：** [クイックスタート](#クイックスタート) ·
 [コマンド](#コマンド) · [仕組み](#仕組み) · [実測](#実測) ·
-[既知の制限](#既知の制限) · [コントリビューション](CONTRIBUTING.md)
+[既知の制限](#既知の制限) · [コントリビューション](../CONTRIBUTING.md)
 
 > **言語について：** CLI と GUI のメッセージは現在中国語のみです。
 > ドキュメントは英語・中国語・日本語で提供しています。
@@ -318,15 +318,15 @@ MTU 65520、PCIe 2.0 x8。送信側はローリングリリースの Linux、受
 
 バグ報告、ドキュメント改善、焦点を絞った Pull Request を歓迎します。開発環境、
 確認コマンド、性能報告に含めるハードウェア情報は
-[CONTRIBUTING.md](CONTRIBUTING.md)を参照してください。
+[CONTRIBUTING.md](../CONTRIBUTING.md)を参照してください。
 
 ## ライセンス
 
 以下のいずれかを、利用者が選択できます。
 
-- Apache License 2.0（[LICENSE-APACHE](LICENSE-APACHE) または
+- Apache License 2.0（[LICENSE-APACHE](../LICENSE-APACHE) または
   <https://www.apache.org/licenses/LICENSE-2.0>）
-- MIT ライセンス（[LICENSE-MIT](LICENSE-MIT) または
+- MIT ライセンス（[LICENSE-MIT](../LICENSE-MIT) または
   <https://opensource.org/licenses/MIT>）
 
 これは Rust エコシステム慣例のデュアルライセンスです。MIT 側は簡潔さを保ち、

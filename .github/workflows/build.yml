@@ -51,7 +51,7 @@ jobs:
             target/release/ibsend
             target/release/ibsend-gui
             README.md
-            README.zh-CN.md
-            README.ja.md
+            docs/README.zh-CN.md
+            docs/README.ja.md
             LICENSE-MIT
             LICENSE-APACHE

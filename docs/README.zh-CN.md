@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="docs/assets/ibsend-mark.svg" width="104" alt="ibsend 标志">
+  <img src="assets/ibsend-mark.svg" width="104" alt="ibsend 标志">
   <h1>ibsend</h1>
   <p><strong>跑满 InfiniBand 链路的点对点文件传输工具。</strong></p>
   <p>一条 RC 队列对，零 TCP，接收端 CPU 不经过数据载荷路径。</p>
@@ -11,7 +11,7 @@
     <img alt="RDMA：InfiniBand 与 RoCE" src="https://img.shields.io/badge/RDMA-InfiniBand%20%7C%20RoCE-7C3AED">
     <a href="#许可证"><img alt="许可证：MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue"></a>
   </p>
-  <p><a href="README.md">English</a> · <strong>简体中文</strong> · <a href="README.ja.md">日本語</a></p>
+  <p><a href="../README.md">English</a> · <strong>简体中文</strong> · <a href="README.ja.md">日本語</a></p>
 </div>
 
 > [!IMPORTANT]
@@ -28,7 +28,7 @@
 | 🔄 | **对等节点** | 同一个可发现的守护进程既能收也能发，支持目录树；可选的拖拽 GUI 复用同一套核心。 |
 
 <p align="center">
-  <img src="docs/assets/architecture.svg" width="900" alt="ibsend 数据路径：文件经过注册内存和一条 RC 队列对进入接收端 RAM，再异步写入磁盘">
+  <img src="assets/architecture.svg" width="900" alt="ibsend 数据路径：文件经过注册内存和一条 RC 队列对进入接收端 RAM，再异步写入磁盘">
 </p>
 
 ### 性能一览
@@ -40,7 +40,7 @@
 
 **快速导航：** [快速上手](#快速上手) · [命令](#命令) ·
 [工作原理](#工作原理) · [实测](#实测) · [已知边界](#已知边界) ·
-[参与贡献](CONTRIBUTING.md)
+[参与贡献](../CONTRIBUTING.md)
 
 > **语言说明：** 命令行和界面的提示目前只有中文，文档提供英文、中文、日文三份。
 
@@ -284,15 +284,15 @@ ICRC 和 VCRC，RC 还有硬件重传，所以数据在网线上被改坏这件�
 ## 参与贡献
 
 欢迎提交问题、改进文档或发起目标明确的 Pull Request。开发环境、检查命令以及
-性能报告所需的硬件信息见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+性能报告所需的硬件信息见 [CONTRIBUTING.md](../CONTRIBUTING.md)。
 
 ## 许可证
 
 本项目采用以下两种许可证之一，由你选择：
 
-- Apache License 2.0（[LICENSE-APACHE](LICENSE-APACHE) 或
+- Apache License 2.0（[LICENSE-APACHE](../LICENSE-APACHE) 或
   <https://www.apache.org/licenses/LICENSE-2.0>）
-- MIT 许可证（[LICENSE-MIT](LICENSE-MIT) 或
+- MIT 许可证（[LICENSE-MIT](../LICENSE-MIT) 或
   <https://opensource.org/licenses/MIT>）
 
 这是 Rust 生态的惯例双许可：MIT 那一半足够简单，Apache 那一半提供了明确的
