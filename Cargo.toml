@@ -1,0 +1,32 @@
+[package]
+name = "ibsend"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+# GUI 是可选的：无头节点（NAS 之类）不需要 OpenGL 那一整套依赖
+gui = ["dep:eframe"]
+
+[dependencies]
+# 只为了 fork/execv：std 的 Command::spawn 在新 glibc 上会引用 pidfd_spawnp
+# （glibc 2.39），编出来的二进制就跑不了 Debian 12 之类的稳定发行版。
+libc = "0.2"
+eframe = { version = "0.36", optional = true, default-features = false, features = [
+    "glow", "wayland", "x11", "default_fonts",
+] }
+
+[build-dependencies]
+cc = "1"
+
+[[bin]]
+name = "ibsend"
+path = "src/main.rs"
+
+[[bin]]
+name = "ibsend-gui"
+path = "src/bin/gui.rs"
+required-features = ["gui"]
+
+[profile.release]
+opt-level = 3
+lto = true
