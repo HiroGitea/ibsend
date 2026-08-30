@@ -289,3 +289,20 @@ defeat the point of resuming. The output says so explicitly.
   either — its access control lives in the rkey, the partition key and the
   subnet manager.
 - Skip detection compares file size only, not content.
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  <https://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or
+  <https://opensource.org/licenses/MIT>)
+
+at your option. This is the customary dual license of the Rust ecosystem: the
+MIT half keeps things simple, and the Apache half adds an explicit patent
+grant — worth having in a space as patent-dense as RDMA.
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in this work, as defined in the Apache-2.0 license,
+shall be dual licensed as above, without any additional terms or conditions.

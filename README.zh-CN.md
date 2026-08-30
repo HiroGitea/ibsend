@@ -245,3 +245,18 @@ ICRC 和 VCRC，RC 还有硬件重传，所以数据在网线上被改坏这件�
 - 无加密、无鉴权，假定 IB 子网是可信的私有网络。顺带一提，RDMA 流量也没法用
   `iptables` 过滤——它的访问控制在 rkey、分区键和子网管理器那里。
 - 跳过判断只比较文件大小，不看内容。
+
+## 许可证
+
+本项目采用以下两种许可证之一，由你选择：
+
+- Apache License 2.0（[LICENSE-APACHE](LICENSE-APACHE) 或
+  <https://www.apache.org/licenses/LICENSE-2.0>）
+- MIT 许可证（[LICENSE-MIT](LICENSE-MIT) 或
+  <https://opensource.org/licenses/MIT>）
+
+这是 Rust 生态的惯例双许可：MIT 那一半足够简单，Apache 那一半提供了明确的
+专利授权——在 RDMA 这种专利密集的领域，这一条是有实际价值的。
+
+除非你另行声明，你有意提交并纳入本项目的任何贡献（按 Apache-2.0 的定义），
+都将以上述双许可发布，不附加任何额外条款。

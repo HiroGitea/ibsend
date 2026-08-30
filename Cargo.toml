@@ -2,6 +2,12 @@
 name = "ibsend"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Peer-to-peer file transfer over InfiniBand: control and data planes on a single RC queue pair, no TCP anywhere"
+repository = "https://github.com/HiroGitea/ibsend"
+readme = "README.md"
+keywords = ["rdma", "infiniband", "file-transfer", "ibverbs"]
+categories = ["command-line-utilities", "network-programming"]
 
 [features]
 # GUI 是可选的：无头节点（NAS 之类）不需要 OpenGL 那一整套依赖
