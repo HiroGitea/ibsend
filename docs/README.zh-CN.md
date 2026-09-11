@@ -1,302 +1,215 @@
 <div align="center">
   <img src="assets/ibsend-mark.svg" width="104" alt="ibsend 标志">
   <h1>ibsend</h1>
-  <p><strong>跑满 InfiniBand 链路的点对点文件传输工具。</strong></p>
-  <p>一条 RC 队列对，零 TCP，接收端 CPU 不经过数据载荷路径。</p>
+  <p><strong>面向 InfiniBand 网络的高速文件传输工具。</strong></p>
   <p>
-    <a href="https://github.com/HiroGitea/ibsend/stargazers"><img alt="GitHub Stars" src="https://img.shields.io/github/stars/HiroGitea/ibsend?style=flat&logo=github"></a>
-    <a href="https://github.com/HiroGitea/ibsend/actions/workflows/build.yml"><img alt="自动构建状态" src="https://github.com/HiroGitea/ibsend/actions/workflows/build.yml/badge.svg?branch=master"></a>
+    <a href="https://github.com/HiroGitea/ibsend/actions/workflows/build.yml"><img alt="构建状态" src="https://github.com/HiroGitea/ibsend/actions/workflows/build.yml/badge.svg?branch=master"></a>
     <img alt="平台：Linux" src="https://img.shields.io/badge/platform-Linux-FCC624?logo=linux&logoColor=black">
-    <img alt="Rust 2021" src="https://img.shields.io/badge/Rust-2021-CE412B?logo=rust&logoColor=white">
     <img alt="RDMA：InfiniBand 与 RoCE" src="https://img.shields.io/badge/RDMA-InfiniBand%20%7C%20RoCE-7C3AED">
     <a href="#许可证"><img alt="许可证：MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue"></a>
   </p>
   <p><a href="../README.md">English</a> · <strong>简体中文</strong> · <a href="README.ja.md">日本語</a></p>
 </div>
 
-> [!IMPORTANT]
-> ibsend 不提供加密和对端身份验证，只适合受信任的私有 RDMA 网络。部署前请先阅读
-> [已知边界](#已知边界)。
+ibsend 用于在 InfiniBand 或 RoCE 网络中的 Linux 主机之间传输文件。它通过 RDMA
+直接发送文件和目录，支持设备发现、断点续传，并提供可选的图形界面。
 
-## 为什么选择 ibsend？
+接收端先将数据暂存在内存中，同时写入磁盘，在存储写入暂时跟不上网络速度时，
+仍可利用可用带宽继续接收。现有 QDR 测试记录的传输速率达到 **3.47 GB/s**，
+测试环境和计时口径见[性能](#性能)。
 
-| | 能力 | 带来的价值 |
-|---|---|---|
-| ⚡ | **RDMA 直通数据路径** | `RDMA_WRITE_WITH_IMM` 把数据直接写进注册内存；控制面和数据面共用一条 RC 队列对。 |
-| 🧠 | **RAM 暂存** | 自适应大内存池吞下链路与磁盘的速度差，接收端异步落盘，发送端仍能以线速完成。 |
-| 🔁 | **断点续传与校验** | 中断的 `.part` 文件按字节续传，每个已传文件都通过硬件加速的 CRC32C 校验。 |
-| 🔄 | **对等节点** | 同一个可发现的守护进程既能收也能发，支持目录树；可选的拖拽 GUI 复用同一套核心。 |
+ibsend 适用于**受信任的私有 RDMA 网络**，不提供传输加密或对端身份验证。
+命令行和图形界面目前使用中文，文档提供英文、简体中文和日文版本。
 
-<p align="center">
-  <img src="assets/architecture.svg" width="900" alt="ibsend 数据路径：文件经过注册内存和一条 RC 队列对进入接收端 RAM，再异步写入磁盘">
-</p>
+[安装](#安装) · [快速上手](#快速上手) · [命令](#命令) ·
+[性能](#性能) · [使用限制](#使用限制)
 
-### 性能一览
+## 主要功能
 
-在双端口 40 Gb QDR 网卡上，ibsend 持续达到 **3.47 GB/s（27.8 Gb/s）**，相当于
-编码后链路数据率的 87%，也已触及 PCIe 2.0 x8 的实际上限。即使 ZFS 目标盘只有
-831 MB/s，RAM 暂存仍让发送端在 **0.62 秒**内完成 2 GB 传输。测试环境和完整数据见
-[实测](#实测)。
+- **RDMA 直接传输**：文件数据和控制消息共用一条 RDMA 连接，无需独立的 TCP 通道。
+- **自适应内存缓冲**：根据可用内存和内存锁定额度调整缓冲池，异步完成磁盘写入。
+- **断点续传与校验**：从中断留下的 `.part` 文件继续传输，并用 CRC32C 校验传输的字节。
+- **文件、目录与设备发现**：一条命令发送多个路径，通过 IPoIB 子网发现接收端，
+  也可使用图形界面拖拽发送。
 
-**快速导航：** [快速上手](#快速上手) · [命令](#命令) ·
-[工作原理](#工作原理) · [实测](#实测) · [已知边界](#已知边界) ·
-[参与贡献](../CONTRIBUTING.md)
+## 安装
 
-> **语言说明：** 命令行和界面的提示目前只有中文，文档提供英文、中文、日文三份。
+两台机器均需运行 Linux，配备支持 RDMA 的网卡，并已配置好 RDMA 网络连接。
+使用 InfiniBand 时，请先配置 IPoIB 地址。从源码构建需要较新的稳定版 Rust
+工具链、C 编译器，以及 `rdma-core` 中 `libibverbs` 和 `librdmacm` 的开发头文件。
 
-## 先决条件
+Debian / Ubuntu 可通过以下命令安装构建依赖：
 
-- 配好 IPoIB 的 InfiniBand 或 RoCE 网卡。IPoIB 只用于地址解析
-  （`rdma_resolve_addr` → GID）和子网扫描。
-- `rdma-core`（libibverbs、librdmacm）及其头文件。
-- Linux，以及较新的 Rust 工具链。
-- 锁定内存的权限，见 [内存锁定](#内存锁定)。
+```sh
+sudo apt-get install build-essential libibverbs-dev librdmacm-dev
+```
 
-## 构建与安装
+在两台机器上分别构建并安装命令行工具：
 
 ```sh
 git clone https://github.com/HiroGitea/ibsend.git
 cd ibsend
-
-cargo install --path . --locked                    # 只安装命令行
-cargo install --path . --locked --features gui     # 命令行 + 图形界面
+cargo install --path . --locked
 ```
 
-图形界面放在 feature 后面是有意的：无头节点不该背上 OpenGL 那一整套依赖。
+安装后，请确认 `$HOME/.cargo/bin` 已加入 `PATH`。
 
-开发时可把 `cargo install --path . --locked` 换成 `cargo build`。安装完成后请确认
-`$HOME/.cargo/bin` 已加入 `PATH`。
+如需图形界面，安装桌面依赖并启用 `gui` 功能。Debian / Ubuntu 的安装命令如下：
+
+```sh
+sudo apt-get install libwayland-dev libxkbcommon-dev
+cargo install --path . --locked --features gui
+```
+
+这会同时安装 `ibsend` 和 `ibsend-gui`。默认的命令行构建不需要图形界面依赖。
+
+### 内存锁定
+
+RDMA 要求注册的内存常驻 RAM。如果 ibsend 提示内存锁定额度限制了缓冲池大小，执行：
+
+```sh
+ibsend authorize
+```
+
+该命令通过 polkit 或 `sudo` 为已安装的程序申请 `CAP_IPC_LOCK` 权限；无法交互
+授权时，会显示手动配置命令。现有额度足够时，不做修改。授权后需重启正在运行的
+ibsend；通过图形界面授权时，界面会自动重启。
+
+权限对所有运行该二进制文件的用户生效。重新编译或安装可能清除该权限，更新后
+可能需要再次授权。
 
 ## 快速上手
 
+在**接收端**启动服务，将设备命名为 `nas`：
+
 ```sh
-# 每个节点都跑一个守护，可被发现、可接收
-ibsend daemon --out /data
+ibsend daemon --name nas --out ./received
+```
 
-# 看看网里有谁
+保持该进程运行。接收的文件会保存到启动目录下的 `./received` 中。
+
+在**发送端**查找接收设备，然后发送文件或目录：
+
+```sh
 ibsend discover
-
-# 发送文件或整个目录，可用地址也可用设备名
-ibsend send 10.0.0.1 ./big.iso
+ibsend send nas ./big.iso
 ibsend send nas ./photos
 ```
 
-目录会递归展开、保留相对路径，接收端重建目录结构。符号链接一律跳过而不是跟随
-——跟随会带来环、会把目录外的东西悄悄拉进来，也让「到底传了什么」不可预测。
+上述命令会在接收端生成 `received/big.iso` 和 `received/photos/`，保留目录内的
+相对路径。也可以用 `ibsend send nas ./big.iso ./photos` 一次发送多个路径。
 
-## 内存锁定
-
-RDMA 注册内存要 pin 住物理页，而多数发行版的 `RLIMIT_MEMLOCK` 默认只有 8 MB。
-这对暂存池来说太小了，而暂存池正是这套设计价值的所在。
-
-更窄的做法是只给这一个二进制加上 `CAP_IPC_LOCK`——内核在 `ib_umem_get` 里的
-判断是「超限**且**没有 CAP_IPC_LOCK」，所以这个能力能绕开限制，而不必为用户
-运行的其他所有进程一起放宽。
-
-`ibsend authorize` 会按环境挑合适的方式：
-
-| 环境 | 方式 |
-|---|---|
-| 桌面（有 `DISPLAY`/`WAYLAND_DISPLAY`） | 弹 polkit 授权框，或点界面上的「授权」 |
-| SSH / 无头，但有终端 | 调 `sudo`，在终端里直接问密码 |
-| 脚本、没有终端 | 打印 `sudo setcap …` 让人手动执行 |
-
-额度已经够用时它不会出声——为了把一个本来就够用的池子变得更大而去要密码，
-不划算。
-
-三点需要知道：
-
-- **能力写在二进制的扩展属性上**，不是「本次运行提权」。授权之后，任何人运行
-  这个文件都带着它。
-- **文件能力在 `execve` 时才装载**，所以授权的那个进程用不上，必须重启。图形
-  界面会自己重启。
-- 重新编译会替换文件，能力随之消失。
-
-打包时应该在安装后钩子里做：
+如需按地址连接，将 `nas` 替换为接收端的 RDMA IPv4 地址：
 
 ```sh
-setcap cap_ipc_lock+ep /usr/bin/ibsend
+ibsend send 10.0.0.1 ./big.iso
 ```
+
+自动选择接口和设备发现使用 IPoIB。使用 RoCE 时，请在接收端通过
+`--bind <RDMA-IPv4-address>` 显式指定监听地址，并在发送端直接使用该地址。
+示例中的 `nas` 是 ibsend 设备发现使用的名称。
+
+桌面用户可以启动 `ibsend-gui`，选择接收设备，将文件拖入窗口，然后按 **Ctrl+S** 发送。
 
 ## 命令
 
-| 命令 | 用途 |
+| 命令 | 说明 |
 |---|---|
-| `ibsend daemon` | 常驻：可被发现、可接收 |
-| `ibsend discover` | 扫描 IPoIB 子网找对端 |
-| `ibsend send <对端> <路径…>` | 发送文件或目录 |
-| `ibsend recv` | 收一次就退出 |
-| `ibsend authorize` | 申请内存锁定权限 |
-| `ibsend-gui [文件…]` | 图形界面（拖拽、Ctrl+S 发送） |
+| `ibsend daemon` | 持续运行接收服务，并响应设备发现。 |
+| `ibsend discover` | 列出本地 IPoIB 子网中的接收设备。 |
+| `ibsend send <peer> <paths…>` | 向指定设备名或 IPv4 地址发送文件和目录。 |
+| `ibsend recv` | 接收一次传输后退出。 |
+| `ibsend authorize` | 按需配置内存锁定权限。 |
+| `ibsend-gui [files…]` | 启动可选的图形界面。 |
 
-`--bind` 默认取第一个 IPoIB 接口。池子大小和 slab 切分自适应，
-`--pool`、`--slab`、`--name` 可以覆盖。
+`daemon` 和 `recv` 支持以下选项：
 
-## 作为库使用
+| 选项 | 默认值 | 说明 |
+|---|---|---|
+| `--bind <IP>` | 第一个 IPoIB 地址 | 本机用于监听的 RDMA 地址。 |
+| `--out <DIR>` | 当前目录 | 接收文件的保存目录。 |
+| `--name <NAME>` | 主机名 | 设备发现时显示的名称。 |
+| `--pool <SIZE>` | 自动调整 | 接收端内存缓冲池大小。 |
+| `--slab <SIZE>` | 自动调整 | 传输块大小。 |
 
-```rust
-use ibsend::{Incoming, Receiver, RecvConfig};
+大小参数支持 `K`、`M`、`G` 后缀，按 1024 的幂计算，例如 `--pool 2G` 表示申请
+2 GiB 缓冲池。发送端的 `--slabs <N>` 控制流水线深度，默认为 16；
+`discover --timeout <MS>` 设置单个地址的解析超时，默认为 300 毫秒。
+不带参数运行 `ibsend` 可查看用法。
 
-let mut rx = Receiver::start(RecvConfig::new("10.0.0.2"))?; // 立即返回
-loop {
-    match rx.accept_one(2000)? {          // 注册与等待连接重叠进行
-        Incoming::Transfer(m) => {
-            rx.receive(&m, |p| println!("{} B/s，暂存 {} B", p.rate(), p.staged))?;
-            rx.end_session()?;            // 保留池子，接着服务下一个
-        }
-        Incoming::Dropped(why) => eprintln!("丢弃：{why}"),
-        _ => {}
-    }
-}
-```
+## 续传与校验
 
-模块：`proto`（线格式）、`tune`（自适应参数）、`walk`（目录展开与路径清洗）、
-`discover`、`recv`、`send`、`daemon`、`authorize`、`crc`。`ffi` 是私有的。
-命令行只做参数解析和进度显示。
+传输中断后，保持源文件和目标目录一致，重新执行同一条发送命令即可。
+接收端会逐个检查目标路径：
+
+| 目标状态 | 处理方式 |
+|---|---|
+| 已存在大小符合预期的完整文件 | 跳过该文件。 |
+| 存在尚未完成的 `.part` 文件 | 从当前字节位置继续传输。 |
+| 两者均不存在 | 从头传输。 |
+
+请保留 `.part` 文件，以便下次续传。完整文件的跳过判断**只比较大小**，不比较内容。
+
+CRC32C 用于核对发送端读取的字节与接收端写入线程处理的字节。续传时只校验本次
+发送的部分，已有部分不会重新校验，也不会从磁盘回读目标文件进行验证。
+校验结果请查看接收端输出。
+
+## 性能
+
+以下数据来自两台配备双端口 40 Gb QDR 网卡、PCIe 2.0 x8 接口的主机。
+IPoIB 使用 connected 模式，MTU 为 65520；发送端运行滚动发行版 Linux，
+接收端运行 Debian 12。数据反映该环境下的测试结果，实际速率随硬件和负载变化。
+
+传输量小于接收端缓冲池时：
+
+| 发送端流水线配置 | 传输速率 |
+|---|---|
+| 6 × 1 MB 块 | **3.47 GB/s** |
+| 3 × 2 MB 块 | **3.47 GB/s** |
+| 1 × 4 MB 块 | 1.94 GB/s |
+
+另一组测试使用 1.5 GB 缓冲池，将约 2 GB 数据传入 ZFS 存储：
+
+| 测量项 | 耗时 | 速率 |
+|---|---|---|
+| 发送端数据传输 | **0.62 s** | **3.48 GB/s** |
+| 接收端（包含文件写入） | 2.58 s | 831 MB/s |
+
+**发送端耗时与接收端完成时间对应不同阶段。** 内存缓冲允许发送端先完成数据发送，
+接收端随后继续写入文件。缓冲池占满后，发送端会等待可用空间，持续吞吐量受接收端
+写入速度限制。实际性能还取决于源文件读取速度、网卡与 PCIe 带宽，以及可用内存。
 
 ## 工作原理
 
-**块序号不上线**。RC 队列对保证顺序，所以接收端自己数第几块就行；32 位的
-immediate 全部用来携带该块的字节数。这样既是字节精确的，又支持事先不知道总长
-的流式传输。`imm == 0` 表示流结束。
+ibsend 通过一条可靠的 RDMA 连接交换文件清单、控制消息和文件数据。网卡将接收的
+数据直接写入已注册的内存池，独立的写入线程负责写入文件，并释放缓冲空间。
+接收服务在不同传输会话之间复用同一内存池。
 
-**先建连、再协商、后注册**。控制面上了队列对之后，顺序自然理顺：建好 QP → 在
-QP 上商定切分方案 → 双方各自注册内存池。控制面还是 TCP 时必须反过来做，只能
-把池子信息塞进 `rdma_cm` 的 `private_data`。
+<p align="center">
+  <img src="assets/architecture.svg" width="900" alt="文件从发送端内存经 RDMA 进入接收端内存，再由写入线程写入磁盘">
+</p>
 
-**信用窗口就是整个池子**。接收端一边落盘一边回报「已释放多少块」，发送端只在
-这个窗口内写。于是数据堆在内存里而不是回压发送端，直到池子真的满了为止。
+协议、内存管理、线程模型和 Rust 库使用示例见[设计文档（英文）](design.md)。
 
-**注册一次，服务多次**。结束会话只拆队列对，保留已注册的池子，所以守护进程
-只在启动时付一次注册代价。池子怎么切成 slab 纯粹是算术，每次传输都能免费重定。
+## 使用限制
 
-**注册是异步的**。分配、预取页面和 `ibv_reg_mr` 在后台线程上跑，与等待对端连接
-的时间重叠，所以启动没有可感知的停顿。
-
-**2 MB 大页**。池子按 2 MB 对齐并标记 `MADV_HUGEPAGE`。老一些的网卡地址翻译
-缓存很小，16 GB 用 4 KB 页要四百万个表项，大页把这个数除以 512。
-
-**收发两端各有一个 I/O 线程**。发送端有读线程，接收端有落盘线程；主线程只做
-队列对操作，因为 libibverbs 不是线程安全的。`ibx_recv_wake` 是唯一的例外——
-它只往 eventfd 写八个字节，不碰任何 verbs 对象。
-
-## 设计札记
-
-一些不显然的东西，记下来免得再踩一遍：
-
-**接收 WR 是按投递顺序被消费的，跟消息类型无关。** 同一队列上混用不同尺寸的
-缓冲区，会让大消息落进小槽位，直接 `local length error`。所以所有接收槽尺寸
-统一，消息种类靠帧头标志位区分。
-
-**返回值空间绝不能重叠。** `poll_cq` 这类函数返回「处理了几个完成事件」，如果
-再用一个小正数表示「超时」，那么恰好批到那么多事件的那一次就会被误读成超时
-——这曾导致间歇性的握手卡死。
-
-**别用超时去「发现」后台线程干完了。** 落盘线程的完成对阻塞在接收路径里的主
-循环是不可见的，只能等超时才补发信用。信用窗口紧张时这会退化成每块一个超时
-周期。用 eventfd 主动唤醒才对。
-
-**预取深度必须同时受两个窗口约束。** 只按本地 slab 数预取，当对端信用窗口更小
-时会死锁：预取占满窗口 → 等信用 → 信用要等数据到达 → 数据要等提交 → 而提交
-排在预取循环之后。
-
-**区分可重试与不可重试。** 对端还没就位导致的连接失败值得重试，本地资源不足
-导致的永远不值得。不区分的话，一个本该瞬间报错的问题会变成几分钟的静默挂起。
-
-**每个超时都有它必须存在的理由。** 一个防双方互等，一个防半死的发送端把守护
-永久挂住，还有一个空闲超时用来抓「连上了却一个字节都不发」的对端。
-
-**丢弃连接必须带上原因。** 静默吞掉握手错误，会把「对方明明连上了却什么都没
-发生」变成完全不可诊断的问题。
-
-**magic 固定、版本号分开。** 分发出去之后版本不一致是必然的。现在两边都会在
-毫秒级报出「协议版本不一致：对端 vN，本机 vM」，而不是一边默默断开、另一边
-傻等超时。
-
-**当心 glibc 符号漂移。** 在滚动发行版上编译，可能静默产出跑不了稳定发行版的
-二进制——`atoi` 会引入 `__isoc23_strtol`（2.38），`std::process::Command` 会
-引入 `pidfd_spawnp`（2.39）。命令行版本两个都避开了，只需要 glibc 2.34。
-
-## 实测
-
-两台机器，双端口 40 Gb QDR 网卡，IPoIB connected 模式、MTU 65520，PCIe 2.0 x8。
-发送端是滚动发行版 Linux，接收端是 Debian 12。
-
-**链路上限**（传输量小于池子，不触发流控）：
-
-| 发送端在途块数 | 速率 |
-|---|---|
-| 6 × 1 MB | **3.47 GB/s** |
-| 3 × 2 MB | **3.47 GB/s** |
-| 1 × 4 MB | 1.94 GB/s |
-
-3.47 GB/s 即 27.8 Gb/s，是 QDR 扣掉 8b/10b 编码后 32 Gb/s 数据率的 87%，同时
-也贴着 PCIe 2.0 x8 的实际上限——两个限制恰好落在同一个数上。
-
-最后一行说明流水线不是可选的：只有一个 slab 时，发送端必须等每次写完成才能
-重新填充，读盘和发送被迫串行，掉到峰值的 56%。
-
-**RAM 暂存的价值**（2 GB 落到 ZFS 盘上，暂存池 1.5 GB）：
-
-| | 耗时 | 速率 |
-|---|---|---|
-| 发送端 | **0.62 s** | 3.48 GB/s |
-| 接收端（含落盘） | 2.58 s | 831 MB/s |
-| RAM 暂存峰值 | | 481 MB |
-
-磁盘只吃得下 831 MB/s，但发送端 0.62 秒就跑完了——池子吞下了这 4.2 倍的差。
-没有暂存的话，发送端会被压到磁盘速度，同样要等满 2.58 秒。
-
-流控介入是能直接观察到的：暂存量从 839 MB 涨到 975 MB（池子 1.07 GB）的同时，
-速率从 3.49 GB/s 降到 2.60 GB/s。
-
-每次传输的 SHA-256 都一致，CRC32C 校验全部通过。
-
-## 断点续传
-
-重跑同一条命令即可。接收端扫描目标目录：已存在且大小正确的文件整个跳过，有
-`.part` 的从当前长度续传，其余从头传。所以 `.part` 不是需要清理的垃圾，它就是
-续传点。
-
-跳过是按文件判断的（大小对得上就算完整），续传是按字节的。
-
-## 校验和
-
-数据排空之后，发送端通过控制通道把每个文件的 CRC32C 发过来核对。接收端在落盘
-线程上算，那个线程本来就在等磁盘；SSE4.2 的 `crc32` 指令跑到约 8 GB/s
-（`cargo run --release --example crcbench` 可自测），远快过链路。
-
-要清楚它防的是什么。**链路完整性早就是硬件卸载的**：每个 IB 包都带由网卡校验的
-ICRC 和 VCRC，RC 还有硬件重传，所以数据在网线上被改坏这件事，软件校验和根本
-抓不到。它防的是本程序自己的 bug、非 ECC 内存翻转和磁盘写入错误——这一类无法
-卸载到老网卡上，因为签名与 T10-DIF 卸载是后来几代才有的。
-
-**续传的文件只校验本次传输的那段字节。** 把已有部分读回来算一遍的成本和干脆
-重传差不多，那样续传就失去意义了。程序会在输出里明说这一点。
-
-## 已知边界
-
-- 空目录不会被传（只传文件）。
-- 无加密、无鉴权，假定 IB 子网是可信的私有网络。顺带一提，RDMA 流量也没法用
-  `iptables` 过滤——它的访问控制在 rkey、分区键和子网管理器那里。
-- 跳过判断只比较文件大小，不看内容。
+- **仅用于可信网络**：不提供加密和身份验证，应在 RDMA 网络层限制访问范围。
+- **传输文件内容与相对路径**：跳过符号链接和特殊文件；不保留空目录、文件权限、
+  所有者和时间戳。
+- **按大小跳过文件**：目标文件大小符合预期时即视为完整，即使内容不同也会跳过；
+  续传时不校验已有部分。
+- **IPoIB 设备发现**：自动扫描仅覆盖地址数不超过 4096 的 IPv4 IPoIB 子网。
+  无法发现设备时，可直接使用对端 IPv4 地址。
 
 ## 参与贡献
 
-欢迎提交问题、改进文档或发起目标明确的 Pull Request。开发环境、检查命令以及
-性能报告所需的硬件信息见 [CONTRIBUTING.md](../CONTRIBUTING.md)。
+欢迎提交问题、改进文档或发起 Pull Request。开发环境、检查命令，以及性能报告
+所需的硬件信息见[贡献指南](../CONTRIBUTING.md)。
 
 ## 许可证
 
-本项目采用以下两种许可证之一，由你选择：
+本项目采用 [MIT](../LICENSE-MIT) 或 [Apache-2.0](../LICENSE-APACHE) 许可证，
+使用者可任选其一。
 
-- Apache License 2.0（[LICENSE-APACHE](../LICENSE-APACHE) 或
-  <https://www.apache.org/licenses/LICENSE-2.0>）
-- MIT 许可证（[LICENSE-MIT](../LICENSE-MIT) 或
-  <https://opensource.org/licenses/MIT>）
-
-这是 Rust 生态的惯例双许可：MIT 那一半足够简单，Apache 那一半提供了明确的
-专利授权——在 RDMA 这种专利密集的领域，这一条是有实际价值的。
-
-除非你另行声明，你有意提交并纳入本项目的任何贡献（按 Apache-2.0 的定义），
+除非另行声明，有意提交并纳入本项目的任何贡献（按 Apache-2.0 的定义），
 都将以上述双许可发布，不附加任何额外条款。

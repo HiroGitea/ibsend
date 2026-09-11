@@ -1,344 +1,241 @@
 <div align="center">
   <img src="docs/assets/ibsend-mark.svg" width="104" alt="ibsend logo">
   <h1>ibsend</h1>
-  <p><strong>Wire-speed peer-to-peer file transfer over InfiniBand.</strong></p>
-  <p>One RC queue pair. Zero TCP. No receiver CPU on the payload path.</p>
+  <p><strong>Fast file transfers over InfiniBand.</strong></p>
   <p>
-    <a href="https://github.com/HiroGitea/ibsend/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/HiroGitea/ibsend?style=flat&logo=github"></a>
     <a href="https://github.com/HiroGitea/ibsend/actions/workflows/build.yml"><img alt="Build status" src="https://github.com/HiroGitea/ibsend/actions/workflows/build.yml/badge.svg?branch=master"></a>
     <img alt="Platform: Linux" src="https://img.shields.io/badge/platform-Linux-FCC624?logo=linux&logoColor=black">
-    <img alt="Built with Rust" src="https://img.shields.io/badge/Rust-2021-CE412B?logo=rust&logoColor=white">
     <img alt="RDMA: InfiniBand and RoCE" src="https://img.shields.io/badge/RDMA-InfiniBand%20%7C%20RoCE-7C3AED">
     <a href="#license"><img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue"></a>
   </p>
   <p><strong>English</strong> · <a href="docs/README.zh-CN.md">简体中文</a> · <a href="docs/README.ja.md">日本語</a></p>
 </div>
 
-> [!IMPORTANT]
-> ibsend has no encryption or peer authentication. It is designed for trusted,
-> private RDMA fabrics; see [Limitations](#limitations) before deployment.
+ibsend is a file transfer tool for Linux hosts on an InfiniBand or RoCE network.
+It sends files and directory trees directly between machines using RDMA, with
+peer discovery, resumable transfers and an optional desktop interface.
 
-## Why ibsend?
+The receiver buffers incoming data in memory while writing it to disk. This
+allows transfers to make use of available network bandwidth when storage writes
+temporarily fall behind. Recorded QDR tests reached **3.47 GB/s**; see
+[Performance](#performance) for the hardware and measurement scope.
 
-| | Capability | What it means |
-|---|---|---|
-| ⚡ | **Direct RDMA data path** | `RDMA_WRITE_WITH_IMM` lands data directly in registered memory; control and data share one RC queue pair. |
-| 🧠 | **RAM staging** | A large adaptive pool absorbs the disk-speed gap, letting the sender finish at link rate while the receiver drains asynchronously. |
-| 🔁 | **Resume and verify** | Interrupted `.part` files resume byte-for-byte; every transferred file is checked with hardware-accelerated CRC32C. |
-| 🔄 | **Symmetric peers** | The same discoverable daemon sends and receives files or directory trees; an optional drag-and-drop GUI uses the same core. |
+ibsend is intended for **trusted, private RDMA networks**. It does not provide
+encryption or peer authentication. CLI and GUI messages are currently in Chinese;
+documentation is available in English, Simplified Chinese and Japanese.
 
-<p align="center">
-  <img src="docs/assets/architecture.svg" width="900" alt="ibsend data path: files pass through registered memory and one RC queue pair into receiver RAM, then drain to disk">
-</p>
+[Installation](#installation) · [Quick start](#quick-start) ·
+[Commands](#commands) · [Performance](#performance) · [Limitations](#limitations)
 
-### Performance at a glance
+## Features
 
-On dual-port 40 Gb QDR HCAs, ibsend sustained **3.47 GB/s (27.8 Gb/s)** — 87%
-of the encoded link data rate and the practical PCIe 2.0 x8 ceiling. With a
-slower 831 MB/s ZFS target, RAM staging still let the sender complete a 2 GB
-transfer in **0.62 s**. See the reproducible setup and full results in
-[Measured](#measured).
+- **Direct RDMA transfers.** File data and control messages use the same RDMA
+  connection, without a separate TCP channel.
+- **Adaptive memory buffering.** Pool sizing adjusts to available memory and
+  memory-locking limits; disk writes run asynchronously.
+- **Resume and verify.** Continue interrupted transfers from `.part` files and
+  check transferred bytes with CRC32C.
+- **Files, folders and named peers.** Send multiple paths in one command, discover
+  receivers on the IPoIB subnet, or use the optional drag-and-drop GUI.
 
-**Jump to:** [Quick start](#quick-start) · [Commands](#commands) ·
-[How it works](#how-it-works) · [Measured](#measured) ·
-[Limitations](#limitations) · [Contributing](CONTRIBUTING.md)
+## Installation
 
-> **Language note:** CLI and GUI messages are currently Chinese only. The
-> documentation is available in English, Chinese and Japanese.
+Both machines need Linux, an RDMA-capable adapter and working RDMA connectivity.
+For InfiniBand, configure IPoIB addresses before starting ibsend. Building from
+source requires a recent stable Rust toolchain, a C compiler and the development
+headers for `libibverbs` and `librdmacm` from `rdma-core`.
 
-## Requirements
+On Debian or Ubuntu, install the build dependencies:
 
-- An InfiniBand or RoCE HCA with IPoIB configured. IPoIB is used only for
-  address resolution (`rdma_resolve_addr` → GID) and subnet scanning.
-- `rdma-core` (libibverbs, librdmacm) plus its headers to build.
-- Linux and a recent Rust toolchain.
-- Permission to lock memory — see [Memory locking](#memory-locking).
+```sh
+sudo apt-get install build-essential libibverbs-dev librdmacm-dev
+```
 
-## Build and install
+Build and install the CLI on both machines:
 
 ```sh
 git clone https://github.com/HiroGitea/ibsend.git
 cd ibsend
-
-cargo install --path . --locked                    # CLI only
-cargo install --path . --locked --features gui     # CLI + GUI
+cargo install --path . --locked
 ```
 
-The GUI is behind a feature flag on purpose: headless nodes should not have to
-carry the OpenGL dependency chain.
+Make sure `$HOME/.cargo/bin` is on `PATH`.
 
-For development builds, replace `cargo install --path . --locked` with
-`cargo build`. After installation, make sure `$HOME/.cargo/bin` is on `PATH`.
+For the optional GUI, install the desktop dependencies and enable the `gui`
+feature. On Debian or Ubuntu:
+
+```sh
+sudo apt-get install libwayland-dev libxkbcommon-dev
+cargo install --path . --locked --features gui
+```
+
+This installs both `ibsend` and `ibsend-gui`. The default CLI build does not
+require the GUI dependencies.
+
+### Memory locking
+
+RDMA requires registered memory to remain resident in RAM. If ibsend reports
+that the memory-locking limit restricts its buffer pool, run:
+
+```sh
+ibsend authorize
+```
+
+The command requests `CAP_IPC_LOCK` for the installed binary through polkit or
+`sudo`, or prints a command for manual setup. It makes no change when the
+available allowance is sufficient. Restart running ibsend processes after
+authorization; the GUI restarts automatically when authorized from its interface.
+
+The permission applies to anyone running that binary. Rebuilding or reinstalling
+can remove it, so authorization may be needed again after an update.
 
 ## Quick start
 
+On the **receiving machine**, start a receiver named `nas`:
+
 ```sh
-# On every node — discoverable, ready to receive
-ibsend daemon --out /data
+ibsend daemon --name nas --out ./received
+```
 
-# See who is on the fabric
+Leave it running. Incoming files are saved under `./received`, relative to the
+directory where the daemon was started.
+
+On the **sending machine**, find the receiver and send a file or directory:
+
+```sh
 ibsend discover
-
-# Send a file or a whole directory, by address or by device name
-ibsend send 10.0.0.1 ./big.iso
+ibsend send nas ./big.iso
 ibsend send nas ./photos
 ```
 
-Directories are expanded recursively with relative paths preserved; the
-receiver rebuilds the tree. Symlinks are skipped rather than followed —
-following them invites cycles, quietly pulls in data from outside the tree, and
-makes "what did I actually send" unpredictable.
+These commands create `received/big.iso` and `received/photos/` on the receiving
+machine, preserving the directory's relative paths. Multiple paths can be sent
+together with `ibsend send nas ./big.iso ./photos`.
 
-## Memory locking
-
-RDMA registration pins physical pages, and the default `RLIMIT_MEMLOCK` is 8 MB
-on most distributions. That is far too small for the staging pool, which is
-where most of this design's value lives.
-
-The narrow fix is to grant this one binary `CAP_IPC_LOCK` — the kernel's check
-in `ib_umem_get` is "over the limit **and** lacking CAP_IPC_LOCK", so the
-capability sidesteps the limit without relaxing it for every other process the
-user runs.
-
-`ibsend authorize` picks whichever route the environment supports:
-
-| Environment | How |
-|---|---|
-| Desktop (`DISPLAY`/`WAYLAND_DISPLAY`) | polkit dialog, or the **Authorize** button in the GUI |
-| SSH or headless, with a terminal | invokes `sudo`, which asks for the password right there |
-| Scripts, no terminal | prints `sudo setcap …` to run by hand |
-
-It stays quiet when the available pool is already large enough; there is no
-reason to ask for a password just to make a comfortable pool larger.
-
-Two things worth knowing:
-
-- **The capability lives in the binary's extended attributes**, not in a
-  per-run elevation. Once granted, anyone running that file carries it.
-- **File capabilities load at `execve`**, so the granting process cannot use
-  them; a restart is required. The GUI restarts itself.
-- Rebuilding replaces the file and drops the capability.
-
-Packages should do this in a post-install hook instead:
+To connect by address, replace `nas` with the receiver's RDMA IPv4 address:
 
 ```sh
-setcap cap_ipc_lock+ep /usr/bin/ibsend
+ibsend send 10.0.0.1 ./big.iso
 ```
+
+Automatic interface selection and discovery use IPoIB. For RoCE, bind the
+receiver explicitly with `--bind <RDMA-IPv4-address>` and send to that address
+directly. The `nas` name above is an ibsend discovery name.
+
+For desktop use, launch `ibsend-gui`, select a peer and add files by dragging them
+into the window. Press **Ctrl+S** to send.
 
 ## Commands
 
-| Command | Purpose |
+| Command | Description |
 |---|---|
-| `ibsend daemon` | Stay resident: discoverable and receiving |
-| `ibsend discover` | Scan the IPoIB subnet for peers |
-| `ibsend send <peer> <paths…>` | Send files or directories |
-| `ibsend recv` | Receive once, then exit |
-| `ibsend authorize` | Request memory-locking permission |
-| `ibsend-gui [files…]` | Graphical front end (drag and drop, Ctrl+S to send) |
+| `ibsend daemon` | Keep a receiver running and available for discovery. |
+| `ibsend discover` | List receivers on local IPoIB subnets. |
+| `ibsend send <peer> <paths…>` | Send files or directories to a peer name or IPv4 address. |
+| `ibsend recv` | Receive one transfer, then exit. |
+| `ibsend authorize` | Set up memory-locking permission when needed. |
+| `ibsend-gui [files…]` | Open the optional desktop interface. |
 
-`--bind` defaults to the first IPoIB interface. Pool size and slab carving
-adapt automatically; `--pool`, `--slab` and `--name` override them.
+Options for `daemon` and `recv`:
 
-## Library
+| Option | Default | Description |
+|---|---|---|
+| `--bind <IP>` | First IPoIB address | Local RDMA address to listen on. |
+| `--out <DIR>` | Current directory | Destination for received files. |
+| `--name <NAME>` | Hostname | Name advertised during discovery. |
+| `--pool <SIZE>` | Automatic | Size of the receiver's memory buffer pool. |
+| `--slab <SIZE>` | Automatic | Transfer block size. |
 
-```rust
-use ibsend::{Incoming, Receiver, RecvConfig};
+Sizes accept `K`, `M` and `G` suffixes, using powers of 1024. For example,
+`--pool 2G` requests a 2 GiB pool. The sender's `--slabs <N>` option controls
+pipeline depth and defaults to 16. `discover --timeout <MS>` sets the per-address
+resolution timeout and defaults to 300 ms. Run `ibsend` without arguments for
+usage information.
 
-let mut rx = Receiver::start(RecvConfig::new("10.0.0.2"))?; // returns immediately
-loop {
-    match rx.accept_one(2000)? {          // registration overlaps with waiting
-        Incoming::Transfer(m) => {
-            rx.receive(&m, |p| println!("{} B/s, staged {} B", p.rate(), p.staged))?;
-            rx.end_session()?;            // keeps the pool, serves the next peer
-        }
-        Incoming::Dropped(why) => eprintln!("dropped: {why}"),
-        _ => {}
-    }
-}
-```
+## Resume and verification
 
-Modules: `proto` (wire format), `tune` (adaptive sizing), `walk` (directory
-expansion and path sanitising), `discover`, `recv`, `send`, `daemon`,
-`authorize`, `crc`. `ffi` is private. The CLI only parses arguments and renders
-progress.
+To resume an interrupted transfer, run the same send command again with the
+same source files and destination. The receiver checks each destination path:
+
+| Destination state | Behavior |
+|---|---|
+| A completed file with the expected size exists | Skip the file. |
+| A partial `.part` file exists | Continue from its current byte offset. |
+| Neither exists | Transfer the file from the beginning. |
+
+Keep `.part` files to preserve resume progress. Completed files are skipped based
+on **size only**; matching contents are not checked before skipping.
+
+CRC32C checks compare the bytes read by the sender with those handled by the
+receiver's writer thread. For resumed files, only bytes sent in the current
+session are checked. The existing prefix is not revalidated, and destination
+files are not read back from disk for verification. Check the receiver's output
+for checksum results.
+
+## Performance
+
+The following results were recorded on two hosts with dual-port 40 Gb QDR
+adapters and PCIe 2.0 x8 connections. IPoIB used connected mode with an MTU of
+65520; the sender ran a rolling-release Linux distribution and the receiver ran
+Debian 12. These results describe that setup; throughput varies with hardware
+and workload.
+
+For transfers smaller than the receiver's buffer pool:
+
+| Sender pipeline | Transfer rate |
+|---|---|
+| 6 × 1 MB blocks | **3.47 GB/s** |
+| 3 × 2 MB blocks | **3.47 GB/s** |
+| 1 × 4 MB block | 1.94 GB/s |
+
+In a separate transfer of approximately 2 GB to a ZFS target with a 1.5 GB
+buffer pool:
+
+| Measurement | Elapsed time | Rate |
+|---|---|---|
+| Sender data transfer | **0.62 s** | **3.48 GB/s** |
+| Receiver, including file writes | 2.58 s | 831 MB/s |
+
+**Sender time and receiver completion time measure different work.** Memory
+buffering lets the sender finish while the receiver continues writing. Once
+the pool fills, the sender waits for space and sustained throughput is limited
+by the receiver's write rate. Actual performance also depends on source reads,
+adapter and PCIe bandwidth, and available memory.
 
 ## How it works
 
-**Chunk numbers never go on the wire.** An RC queue pair preserves order, so the
-receiver simply counts arrivals; the full 32-bit immediate carries the chunk's
-byte count instead. That is byte-exact and supports streaming without knowing
-the total length in advance. `imm == 0` ends the stream.
+ibsend uses a single reliable RDMA connection for file metadata, transfer control
+and payload data. The adapter writes incoming payloads directly into a registered
+memory pool. A separate writer thread consumes that data and releases buffer
+space for subsequent transfers. The daemon reuses the pool across sessions.
 
-**Connect, then negotiate, then register.** With the control plane on the queue
-pair the ordering works out naturally: establish the QP, agree on the carving
-over it, then each side registers its pool. When the control plane was TCP this
-had to run backwards, which forced pool details into `rdma_cm`'s
-`private_data`.
+<p align="center">
+  <img src="docs/assets/architecture.svg" width="900" alt="Files move from sender memory over RDMA into receiver memory, then to disk through a writer thread">
+</p>
 
-**The credit window is the whole pool.** The receiver returns "slabs released"
-as it drains; the sender writes only within that window. Data therefore piles up
-in RAM rather than throttling the sender, until the pool genuinely fills.
-
-**Register once, serve many.** Ending a session tears down the queue pair but
-keeps the registered pool, so a daemon pays the registration cost only at
-startup. How the pool is carved into slabs is pure arithmetic, so it can be
-re-decided per transfer for free.
-
-**Registration is asynchronous.** Allocation, page prefault and `ibv_reg_mr` run
-on a background thread that overlaps with waiting for a peer, so startup has no
-perceptible stall.
-
-**2 MB huge pages.** The pool is 2 MB aligned and marked `MADV_HUGEPAGE`. The
-address-translation cache on older HCAs is small; 16 GB with 4 KB pages needs
-four million entries, and huge pages divide that by 512.
-
-**One I/O thread on each side.** The sender has a reader thread, the receiver a
-writer thread; the main thread does nothing but queue-pair work, because
-libibverbs is not thread safe. `ibx_recv_wake` is the sole exception — it only
-writes eight bytes to an eventfd and touches no verbs object.
-
-## Design notes
-
-Things that were not obvious, recorded so they are not rediscovered the hard
-way:
-
-**Receive work requests are consumed in posting order, regardless of message
-type.** Mixing buffer sizes on one queue means a large message can land in a
-small slot and fail with `local length error`. All receive slots are therefore
-the same size, and the message kind is carried in a frame header flag.
-
-**Never overload a return-value space.** `poll_cq` style helpers return "how
-many completions were processed"; using a small positive number to also mean
-"timed out" produced an intermittent handshake hang, because the run where
-exactly that many completions were batched together was misread as a timeout.
-
-**Do not use a timeout to notice that a background thread finished.** The writer
-thread's completion is invisible to a main loop blocked in the receive path, so
-credits are only returned when the timeout expires. With a tight credit window
-that degenerates into one timeout period per chunk. An eventfd wake removes it.
-
-**Prefetch depth must respect both windows.** Prefetching against the local slab
-count alone deadlocks when the peer's credit window is smaller: prefetch fills
-the window, credits need data to arrive, data needs a commit, and the commit sits
-after the prefetch loop.
-
-**Distinguish retryable from fatal.** A connect failure caused by the peer not
-being ready is worth retrying; one caused by a local resource limit never is.
-Retrying the latter turns an instant, clear error into a silent multi-minute
-hang.
-
-**Every timeout earns its place.** One guards against mutual waiting, one stops
-a half-dead sender from wedging the daemon forever, and an idle timeout catches
-a peer that connects and then says nothing.
-
-**Dropped connections must carry a reason.** Silently swallowing a handshake
-error turns "the peer connected and then nothing happened" into something nobody
-can diagnose.
-
-**Keep the magic constant and version separately.** Mixed versions are
-inevitable once something is distributed. Both sides now report
-"protocol version mismatch: peer vN, local vM" within milliseconds instead of
-one side disconnecting quietly while the other waits for a timeout.
-
-**Watch out for glibc symbol creep.** Building on a rolling distribution can
-silently produce binaries that will not start on a stable one — `atoi` pulls in
-`__isoc23_strtol` (2.38) and `std::process::Command` pulls in `pidfd_spawnp`
-(2.39). The CLI avoids both and needs nothing newer than glibc 2.34.
-
-## Measured
-
-Two hosts, dual-port 40 Gb QDR HCAs, IPoIB in connected mode with a 65520 byte
-MTU, PCIe 2.0 x8. Sender on a rolling-release Linux, receiver on Debian 12.
-
-**Link ceiling** (transfer smaller than the pool, so flow control never engages):
-
-| Sender slabs in flight | Rate |
-|---|---|
-| 6 × 1 MB | **3.47 GB/s** |
-| 3 × 2 MB | **3.47 GB/s** |
-| 1 × 4 MB | 1.94 GB/s |
-
-3.47 GB/s is 27.8 Gb/s — 87 % of QDR's 32 Gb/s data rate after 8b/10b encoding,
-and simultaneously right at the practical ceiling of PCIe 2.0 x8. Both limits
-happen to land on the same number.
-
-The last row shows pipelining is not optional: with a single slab the sender
-must wait for each write to complete before refilling, so reading and sending
-serialise and throughput drops to 56 % of peak.
-
-**What RAM staging buys** (2 GB onto a ZFS pool, 1.5 GB staging pool):
-
-| | Elapsed | Rate |
-|---|---|---|
-| Sender | **0.62 s** | 3.48 GB/s |
-| Receiver, including drain | 2.58 s | 831 MB/s |
-| Peak staged in RAM | | 481 MB |
-
-The disk only absorbs 831 MB/s, yet the sender was done in 0.62 s — the pool
-swallowed the 4.2× difference. Without staging the sender would have been
-throttled to disk speed and taken the full 2.58 s.
-
-Flow control engaging is directly observable: as staged bytes climbed from
-839 MB to 975 MB against a 1.07 GB pool, the rate fell from 3.49 GB/s to
-2.60 GB/s.
-
-Every transfer's SHA-256 matched and every CRC32C check passed.
-
-## Resume
-
-Re-run the same command. The receiver scans the destination: a file that already
-exists at the right size is skipped entirely, a `.part` file is resumed from its
-current length, and everything else is sent in full. So `.part` files are not
-litter to clean up — they are the resume point.
-
-Skipping is decided per file (matching size counts as complete); resuming is
-byte-granular.
-
-## Checksums
-
-After the data drains, the sender sends a CRC32C per file over the control
-channel and the receiver compares. The receiver computes it on the writer
-thread, which is waiting on disk anyway; SSE4.2's `crc32` instruction runs at
-roughly 8 GB/s (`cargo run --release --example crcbench`), well past the link.
-
-Be clear about what this catches. **Link integrity is already offloaded**: every
-IB packet carries ICRC and VCRC checked by the HCA, and RC retransmits in
-hardware, so corruption on the wire is not a thing a software checksum could
-find. What it catches is this program's own bugs, non-ECC memory flips and disk
-write errors — a class that cannot be offloaded to older HCAs, since signature
-and T10-DIF offload arrived with later generations.
-
-**A resumed file is only checked over the bytes sent this session.** Re-reading
-the existing prefix would cost about as much as retransmitting it, which would
-defeat the point of resuming. The output says so explicitly.
+See the [design documentation](docs/design.md) for the protocol, buffering,
+threading model and Rust library example.
 
 ## Limitations
 
-- Empty directories are not transferred (only files are).
-- No encryption and no authentication; the IB subnet is assumed to be a trusted
-  private network. Note that RDMA traffic cannot be filtered with `iptables`
-  either — its access control lives in the rkey, the partition key and the
-  subnet manager.
-- Skip detection compares file size only, not content.
+- **Trusted networks only.** Transfers are neither encrypted nor authenticated.
+  Restrict access at the RDMA fabric level.
+- **File contents and relative paths.** Symlinks and special files are skipped;
+  empty directories, file permissions, ownership and timestamps are not preserved.
+- **Size-based skipping.** An existing file with the expected size is treated as
+  complete, even if its contents differ. Resumed prefixes are not verified.
+- **IPoIB discovery.** Automatic discovery scans IPv4 IPoIB subnets with at most
+  4096 addresses. Use a peer's IPv4 address when discovery is unavailable.
 
 ## Contributing
 
-Bug reports, documentation improvements and focused pull requests are welcome.
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup, verification
-commands and the hardware details to include in performance reports.
+Bug reports, documentation improvements and pull requests are welcome. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the development setup, checks and the
+hardware details to include in performance reports.
 
 ## License
 
-Licensed under either of
-
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
-  <https://www.apache.org/licenses/LICENSE-2.0>)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or
-  <https://opensource.org/licenses/MIT>)
-
-at your option. This is the customary dual license of the Rust ecosystem: the
-MIT half keeps things simple, and the Apache half adds an explicit patent
-grant — worth having in a space as patent-dense as RDMA.
+Licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
 
 Unless you explicitly state otherwise, any contribution intentionally
 submitted for inclusion in this work, as defined in the Apache-2.0 license,
