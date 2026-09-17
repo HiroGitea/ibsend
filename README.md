@@ -16,9 +16,9 @@ It sends files and directory trees directly between machines using RDMA, with
 peer discovery, resumable transfers and an optional desktop interface.
 
 The receiver buffers incoming data in memory while writing it to disk. This
-allows transfers to make use of available network bandwidth when storage writes
-temporarily fall behind. Recorded QDR tests reached **3.47 GB/s**; see
-[Performance](#performance) for the hardware and measurement scope.
+allows the receiver to keep accepting data when disk writes temporarily fall
+behind the network. QDR tests reached **3.47 GB/s**; see
+[Performance](#performance) for the test setup and how transfer times were measured.
 
 ibsend is intended for **trusted, private RDMA networks**. It does not provide
 encryption or peer authentication. CLI and GUI messages are currently in Chinese;
@@ -33,9 +33,9 @@ documentation is available in English, Simplified Chinese and Japanese.
   connection, without a separate TCP channel.
 - **Adaptive memory buffering.** Pool sizing adjusts to available memory and
   memory-locking limits; disk writes run asynchronously.
-- **Resume and verify.** Continue interrupted transfers from `.part` files and
-  check transferred bytes with CRC32C.
-- **Files, folders and named peers.** Send multiple paths in one command, discover
+- **Resume and verify.** Resume interrupted transfers from `.part` files and
+  verify transferred data with CRC32C.
+- **Multiple files and receiver discovery.** Send multiple paths in one command, discover
   receivers on the IPoIB subnet, or use the optional drag-and-drop GUI.
 
 ## Installation
@@ -83,7 +83,7 @@ ibsend authorize
 
 The command requests `CAP_IPC_LOCK` for the installed binary through polkit or
 `sudo`, or prints a command for manual setup. It makes no change when the
-available allowance is sufficient. Restart running ibsend processes after
+memory-locking limit is already sufficient. Restart running ibsend processes after
 authorization; the GUI restarts automatically when authorized from its interface.
 
 The permission applies to anyone running that binary. Rebuilding or reinstalling
@@ -205,9 +205,9 @@ adapter and PCIe bandwidth, and available memory.
 ## How it works
 
 ibsend uses a single reliable RDMA connection for file metadata, transfer control
-and payload data. The adapter writes incoming payloads directly into a registered
-memory pool. A separate writer thread consumes that data and releases buffer
-space for subsequent transfers. The daemon reuses the pool across sessions.
+and file data. The adapter writes incoming data directly into a registered
+memory pool. A separate writer thread saves the data to disk and releases buffer
+space for more incoming data. The daemon reuses the pool across sessions.
 
 <p align="center">
   <img src="docs/assets/architecture.svg" width="900" alt="Files move from sender memory over RDMA into receiver memory, then to disk through a writer thread">
