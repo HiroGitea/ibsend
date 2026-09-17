@@ -66,10 +66,24 @@ fn probe(addr: Ipv4Addr, port: u16, resolve_ms: i32) -> Option<Peer> {
     Some(Peer { name: info.name, note: info.note, inbox: info.inbox, addr })
 }
 
-/// 扫描所有 IPoIB 接口所在的子网。
+/// 扫描所有 IPoIB 接口所在的子网，跳过本机地址。
 /// `resolve_ms` 是单个地址的地址解析超时——空地址要等满这个时间（ARP 失败），
 /// 所以它和并发度共同决定总耗时。
+///
+/// 跳过本机是给 GUI 用的：它自己就是个守护，不该在列表里看到自己。
 pub fn scan(port: u16, resolve_ms: i32, threads: usize) -> Vec<Peer> {
+    scan_with(port, resolve_ms, threads, false)
+}
+
+/// 同 [`scan`]，但本机地址也探测。
+///
+/// 命令行和容器里需要这个：同一台机器上的另一个进程（或 hostNetwork 下同一
+/// 节点上的另一个 Pod）完全可能在跑接收端。
+pub fn scan_including_local(port: u16, resolve_ms: i32, threads: usize) -> Vec<Peer> {
+    scan_with(port, resolve_ms, threads, true)
+}
+
+fn scan_with(port: u16, resolve_ms: i32, threads: usize, local: bool) -> Vec<Peer> {
     let ifaces = match local_ipoib() {
         Ok(v) => v,
         Err(_) => return Vec::new(),
@@ -85,7 +99,7 @@ pub fn scan(port: u16, resolve_ms: i32, threads: usize) -> Vec<Peer> {
         let net = ipn & maskn;
         for h in 1..hosts.saturating_sub(1) {
             let a = Ipv4Addr::from(net + h);
-            if a != *ip {
+            if local || a != *ip {
                 targets.push(a);
             }
         }

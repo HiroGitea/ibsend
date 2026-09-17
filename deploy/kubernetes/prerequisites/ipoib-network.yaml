@@ -1,0 +1,36 @@
+# Multus 模式用的网络：ipoib-cni 从节点的 ib0 派生一个 IPoIB 子接口放进 Pod，
+# 地址由 whereabouts 在整个集群范围内分配，不会重复。
+#
+# 前提：集群里装了 Multus、ipoib-cni 和 whereabouts
+#   https://github.com/k8snetworkplumbingwg/multus-cni
+#   https://github.com/Mellanox/ipoib-cni
+#   https://github.com/k8snetworkplumbingwg/whereabouts
+# 使用：chart 里设 network.mode=multus、network.multus.networks=ipoib-network，
+# 或者在 Pod 注解里写 k8s.v1.cni.cncf.io/networks: ipoib-network。
+#
+# 注意：
+#   - master 要写节点上 IPoIB 接口的真实名字（ib0、ibp133s0……），各节点不一致时
+#     给每类节点建一个 NetworkAttachmentDefinition
+#   - 子接口是 IPoIB 类型（ARPHRD_INFINIBAND），ibsend 会自动选中它，不用 --bind
+#   - 自动发现只扫描不超过 4096 个地址的子网，range 不要开得比 /20 更大
+#   - 发送端和接收端要在同一个网络里：Multus 模式的 Pod 和 hostNetwork 的 Pod
+#     分属不同子网时，彼此通常是不通的，整个集群统一用一种模式最省事
+#   - Linux 5.8 之前的内核（或 MLNX_OFED 5.1 之前）同一节点上的 Pod 之间可能
+#     不通，见 ipoib-cni README 的 Limitations
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: ipoib-network
+  namespace: ibsend
+spec:
+  config: |
+    {
+      "cniVersion": "0.3.1",
+      "name": "ipoib-network",
+      "type": "ipoib",
+      "master": "ib0",
+      "ipam": {
+        "type": "whereabouts",
+        "range": "192.168.50.0/24"
+      }
+    }

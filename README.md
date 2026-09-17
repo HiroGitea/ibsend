@@ -25,7 +25,8 @@ encryption or peer authentication. CLI and GUI messages are currently in Chinese
 documentation is available in English, Simplified Chinese and Japanese.
 
 [Installation](#installation) · [Quick start](#quick-start) ·
-[Commands](#commands) · [Performance](#performance) · [Limitations](#limitations)
+[Commands](#commands) · [Containers](#containers-and-kubernetes) ·
+[Performance](#performance) · [Limitations](#limitations)
 
 ## Features
 
@@ -37,6 +38,8 @@ documentation is available in English, Simplified Chinese and Japanese.
   verify transferred data with CRC32C.
 - **Multiple files and receiver discovery.** Send multiple paths in one command, discover
   receivers on the IPoIB subnet, or use the optional drag-and-drop GUI.
+- **Containers and automation.** Run ibsend with Docker or Kubernetes, and
+  integrate it into scripts with JSON output and fixed exit codes.
 
 ## Installation
 
@@ -145,12 +148,18 @@ Options for `daemon` and `recv`:
 | `--name <NAME>` | Hostname | Name advertised during discovery. |
 | `--pool <SIZE>` | Automatic | Size of the receiver's memory buffer pool. |
 | `--slab <SIZE>` | Automatic | Transfer block size. |
+| `--port <N>` | `18515` | `rdma_cm` port. |
+| `--ready-file <PATH>` | None | File to create once the receiver is ready. |
+| `--json` | Off | Write JSON events to standard output. |
 
 Sizes accept `K`, `M` and `G` suffixes, using powers of 1024. For example,
 `--pool 2G` requests a 2 GiB pool. The sender's `--slabs <N>` option controls
-pipeline depth and defaults to 16. `discover --timeout <MS>` sets the per-address
-resolution timeout and defaults to 300 ms. Run `ibsend` without arguments for
-usage information.
+pipeline depth and defaults to 16, and `--prefix <DIR>` places files under a
+subdirectory of the receiver's output directory. `discover --timeout <MS>` sets
+the per-address resolution timeout and defaults to 300 ms. `send` and `discover`
+also accept `--port` and `--json`; see
+[Scripting interface](docs/containers.md#scripting-interface) for the JSON events
+and exit codes. Run `ibsend` without arguments for usage information.
 
 ## Resume and verification
 
@@ -171,6 +180,27 @@ receiver's writer thread. For resumed files, only bytes sent in the current
 session are checked. The existing prefix is not revalidated, and destination
 files are not read back from disk for verification. Check the receiver's output
 for checksum results.
+
+## Containers and Kubernetes
+
+Build the container image from the repository root:
+
+```sh
+docker build -t ibsend .
+```
+
+Containers need the host's IPoIB network, the RDMA devices and the `IPC_LOCK`
+capability. The `inbox` directory must be writable by UID 10001:
+
+```sh
+docker run -d --network host --device /dev/infiniband \
+  --cap-drop ALL --cap-add IPC_LOCK --memory 8g \
+  -v "$PWD/inbox:/data" ibsend daemon --out /data --name nas
+```
+
+The receive pool is sized from the container's memory limit. For Kubernetes, the
+repository provides a Helm chart, plain manifests, example workloads and a
+`kubectl ibsend` plugin. See [Containers and Kubernetes](docs/containers.md).
 
 ## Performance
 

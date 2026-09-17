@@ -1,0 +1,44 @@
+# k8s-rdma-shared-dev-plugin 的配置：把节点上的 Mellanox IB 网卡作为
+# rdma/hca_shared_devices_a 资源暴露出来，ibsend 的 Pod 申请 1 个即可拿到
+# /dev/infiniband 下的设备，不需要 privileged。
+#
+# 插件本体（DaemonSet rdma-shared-dp-ds）按官方仓库部署：
+#   https://github.com/Mellanox/k8s-rdma-shared-dev-plugin#how-to-use-device-plugin
+#   git clone https://github.com/Mellanox/k8s-rdma-shared-dev-plugin
+#   kubectl apply -k k8s-rdma-shared-dev-plugin/deployment/k8s/base
+# 那个 kustomization 自带一份同名的示例 ConfigMap（按 ib0/ib1 选设备），
+# 部署之后再应用这一份覆盖它，然后重启插件让它重新读配置：
+#   kubectl apply -f deploy/kubernetes/prerequisites/rdma-shared-device-plugin.yaml
+#   kubectl -n kube-system rollout restart daemonset/rdma-shared-dp-ds
+#
+# 用 NVIDIA Network Operator 的话，把 configList 里的内容写进
+# NicClusterPolicy 的 spec.rdmaSharedDevicePlugin.config，不需要这个文件。
+#
+# 字段说明（见插件 README 的 "RDMA Shared Device Plugin Configurations"）：
+#   resourceName  资源名，默认前缀是 rdma，合起来就是 rdma/hca_shared_devices_a，
+#                 要和 chart 的 rdma.resourceName 一致
+#   rdmaHcaMax    每个节点最多能分给多少个 Pod（shared 模式下大家共用同一块 HCA）
+#   selectors     各选择器之间是「与」，同一选择器里的多个值是「或」：
+#                   vendors    PCI 厂商号，15b3 是 Mellanox/NVIDIA（mlx4、mlx5 都是）
+#                   linkTypes  网卡的链路类型，IB 是 infiniband，RoCE 是 ether
+#                 也可以用 deviceIDs、drivers、ifNames 进一步收窄
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rdma-devices
+  namespace: kube-system
+data:
+  config.json: |
+    {
+      "periodicUpdateInterval": 300,
+      "configList": [
+        {
+          "resourceName": "hca_shared_devices_a",
+          "rdmaHcaMax": 1000,
+          "selectors": {
+            "vendors": ["15b3"],
+            "linkTypes": ["infiniband"]
+          }
+        }
+      ]
+    }

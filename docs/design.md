@@ -134,11 +134,12 @@ Generate the API documentation with `cargo doc --no-deps --open`.
 |---|---|
 | `send`, `recv`, `daemon` | Transfers, receiver sessions and the daemon loop. |
 | `proto` | Wire format and protocol versioning. |
-| `tune` | Memory budgets and slab sizing. |
+| `tune` | Memory budgets from memlock and cgroup limits, and slab sizing. |
 | `walk` | Directory traversal and relative-path validation. |
 | `discover` | IPoIB subnet scanning and peer information. |
 | `authorize` | Memory-locking permission setup. |
 | `crc` | CRC32C implementations. |
+| `json` | JSON event encoding for the CLI's `--json` output. |
 | `ffi` (private) | Bindings to the C transport in `csrc/ibx.c`. |
 
 ## Packaging
@@ -152,6 +153,11 @@ setcap cap_ipc_lock+ep /usr/bin/ibsend
 
 File capabilities apply on the next execution and need to be reapplied when the
 binary is replaced. The GUI binary needs its own capability if packaged.
+
+The container image cannot rely on `ibsend authorize`. It ships a second copy
+of the binary with the capability set, and its entrypoint selects that copy only
+when `IPC_LOCK` is in the capability bounding set; otherwise `execve` would fail
+with `EPERM`. See [Containers and Kubernetes](containers.md#memory-locking).
 
 The C build explicitly selects GNU C11 to avoid introducing C23-specific glibc
 symbols through functions such as `atoi`. Process launching uses `fork` and

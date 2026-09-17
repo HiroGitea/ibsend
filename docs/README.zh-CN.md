@@ -22,7 +22,7 @@ ibsend 适用于**受信任的私有 RDMA 网络**，不提供传输加密或对
 命令行和图形界面目前使用中文，文档提供英文、简体中文和日文版本。
 
 [安装](#安装) · [快速上手](#快速上手) · [命令](#命令) ·
-[性能](#性能) · [使用限制](#使用限制)
+[容器](#容器与-kubernetes) · [性能](#性能) · [使用限制](#使用限制)
 
 ## 主要功能
 
@@ -31,6 +31,8 @@ ibsend 适用于**受信任的私有 RDMA 网络**，不提供传输加密或对
 - **断点续传与校验**：从中断留下的 `.part` 文件继续传输，并用 CRC32C 校验传输的数据。
 - **批量传输与设备发现**：一条命令发送多个路径，通过 IPoIB 子网发现接收端，
   也可使用图形界面拖拽发送。
+- **容器与自动化**：可在 Docker 或 Kubernetes 中运行，并通过 JSON 输出和固定的退出码
+  集成到脚本中。
 
 ## 安装
 
@@ -131,11 +133,16 @@ ibsend send 10.0.0.1 ./big.iso
 | `--name <NAME>` | 主机名 | 设备发现时显示的名称。 |
 | `--pool <SIZE>` | 自动调整 | 接收端内存缓冲池大小。 |
 | `--slab <SIZE>` | 自动调整 | 传输块大小。 |
+| `--port <N>` | `18515` | `rdma_cm` 端口。 |
+| `--ready-file <PATH>` | 无 | 接收端就绪后创建该文件。 |
+| `--json` | 关闭 | 在标准输出中逐行输出 JSON 事件。 |
 
 大小参数支持 `K`、`M`、`G` 后缀，按 1024 的幂计算，例如 `--pool 2G` 表示申请
 2 GiB 缓冲池。发送端的 `--slabs <N>` 控制流水线深度，默认为 16；
+`--prefix <DIR>` 将文件放到接收端保存目录下的子目录中。
 `discover --timeout <MS>` 设置单个地址的解析超时，默认为 300 毫秒。
-不带参数运行 `ibsend` 可查看用法。
+`send` 和 `discover` 同样支持 `--port` 和 `--json`，JSON 事件和退出码见
+[脚本接口](containers.md#scripting-interface)（英文）。不带参数运行 `ibsend` 可查看用法。
 
 ## 续传与校验
 
@@ -153,6 +160,27 @@ ibsend send 10.0.0.1 ./big.iso
 CRC32C 用于检查发送端读取的数据与接收端写入线程处理的数据是否一致。续传时只校验本次
 发送的部分，已有部分不会重新校验，也不会重新读取磁盘上的目标文件进行校验。
 校验结果请查看接收端输出。
+
+## 容器与 Kubernetes
+
+在仓库根目录构建容器镜像：
+
+```sh
+docker build -t ibsend .
+```
+
+容器需要使用宿主机的 IPoIB 网络、RDMA 设备和 `IPC_LOCK` 权限。
+UID 为 10001 的用户必须能够写入 `inbox` 目录：
+
+```sh
+docker run -d --network host --device /dev/infiniband \
+  --cap-drop ALL --cap-add IPC_LOCK --memory 8g \
+  -v "$PWD/inbox:/data" ibsend daemon --out /data --name nas
+```
+
+接收端缓冲池大小会根据容器的内存上限自动调整。仓库还提供了用于 Kubernetes 的
+Helm chart、YAML 部署文件、示例工作负载和 `kubectl ibsend` 插件，
+详见[容器与 Kubernetes](containers.md)（英文）。
 
 ## 性能
 

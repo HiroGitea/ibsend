@@ -1,0 +1,130 @@
+# ibsend 接收端 DaemonSet：每个 IB 节点常驻一个 `ibsend daemon`，
+# 可被发现、可接收，收到的文件落到 storage 指定的卷里。
+#
+# 前提（详见 docs/containers.md）：
+#   - 节点上部署了 k8s-rdma-shared-dev-plugin，提供 rdma.resourceName 这个资源
+#   - release 所在 namespace 的 Pod Security 级别是 privileged
+#     （baseline 不允许 IPC_LOCK 能力，也不允许 hostNetwork）
+
+image:
+  # 镜像不对外发布：在仓库根目录 `docker build -t <仓库>/ibsend:<版本> .`
+  # 推到自己的镜像仓库，再把这里改成对应的地址
+  repository: ibsend
+  # 留空则使用 Chart.yaml 里的 appVersion
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# 私有镜像仓库的凭据，例如 [{name: regcred}]
+imagePullSecrets: []
+
+# 覆盖 chart 名（影响 app.kubernetes.io/name 标签，kubectl ibsend 默认按 ibsend 查找）
+nameOverride: ""
+# 覆盖资源全名
+fullnameOverride: ""
+
+rdma:
+  # 设备插件暴露的扩展资源名，要和插件 ConfigMap 里的 resourcePrefix/resourceName 对应。
+  # 留空则不申请（设备要通过别的方式挂进容器）
+  resourceName: rdma/hca_shared_devices_a
+  # 申请数量。shared 插件里每个 Pod 申请 1 个即可拿到整块 HCA
+  count: 1
+
+network:
+  # Pod 从哪里拿到 IPoIB 接口：
+  #   host   —— hostNetwork，直接用节点的 ib0；自动发现照常工作。
+  #             同一节点上别的接收端（例如一次性的 recv Pod）必须换端口
+  #   multus —— 由 Multus 挂一个 IPoIB 子接口（ipoib-cni），每个 Pod 有自己的地址
+  mode: host
+  multus:
+    # mode=multus 时必填：NetworkAttachmentDefinition 的名字，
+    # 可以写 "name" 或 "namespace/name"，多个用逗号分隔。
+    # 示例见 deploy/kubernetes/prerequisites/ipoib-network.yaml
+    networks: ""
+
+daemon:
+  # rdma_cm 端口（不是 TCP 端口，kube-proxy 和 Service 都管不到它）
+  port: 18515
+  # 发现时显示的名字；留空则用节点名，`ibsend send <节点名> ...` 就能找到它
+  name: ""
+  # 监听地址；留空则自动选 Pod 网络命名空间里的第一个 IPoIB 接口
+  bind: ""
+  # 内存暂存池大小，例如 "4G"；留空则按容器 memory limit 自适应（约 1/3）
+  pool: ""
+  # 单块大小，例如 "4M"；留空则按每次传输的大小自适应
+  slab: ""
+  # 日志改为每行一个 JSON 事件，方便日志系统解析
+  json: false
+  # 追加到 daemon 命令行末尾的参数
+  extraArgs: []
+
+storage:
+  # 收到的文件放在哪：
+  #   hostPath —— 节点本地目录，适合把数据预热到每个节点的本地盘
+  #   pvc      —— 已有的 PersistentVolumeClaim（DaemonSet 的所有 Pod 共用，需要 RWX）
+  #   emptyDir —— 随 Pod 删除，只适合测试
+  type: hostPath
+  hostPath:
+    path: /var/lib/ibsend/inbox
+    type: DirectoryOrCreate
+    # hostPath 不受 fsGroup 影响，新建出来的目录属于 root。开启后用一个 init 容器
+    # （root，只有 CHOWN 能力）把目录交给 podSecurityContext 里的 UID/GID
+    fixPermissions: true
+  pvc:
+    # storage.type=pvc 时必填
+    claimName: ""
+
+# Pod 级安全上下文。镜像默认用户是 10001:10001，收到的文件也归它所有
+podSecurityContext:
+  runAsUser: 10001
+  runAsGroup: 10001
+  runAsNonRoot: true
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+# ibsend 容器的安全上下文
+securityContext:
+  # 必须为 true：镜像里的 ibsend 通过文件能力（setcap cap_ipc_lock+ep）拿到
+  # IPC_LOCK。设为 false 会给进程加上 no_new_privs，内核就不再授予文件能力，
+  # 非 root 进程的内存池会被 memlock 限制压到几 MB
+  allowPrivilegeEscalation: true
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+    # RDMA 注册内存需要 pin 住物理页
+    add: [IPC_LOCK]
+
+# 资源。memory limit 决定内存池大小（约 1/3），建议显式设置，例如：
+#   limits:
+#     memory: 16Gi
+# rdma 资源会自动合并进 limits，不用在这里写
+resources: {}
+
+nodeSelector: {}
+  # 只调度到有 IB 的节点，例如 Node Feature Discovery 打的标签：
+  # feature.node.kubernetes.io/rdma.available: "true"
+
+tolerations: []
+
+affinity: {}
+
+priorityClassName: ""
+
+podAnnotations: {}
+
+podLabels: {}
+
+updateStrategy:
+  type: RollingUpdate
+
+# daemon 收到 SIGTERM 就退出；传了一半的文件留在 .part 里，下次发送会续传
+terminationGracePeriodSeconds: 30
+
+# 就绪探针检查 /run/ibsend/ready：内存池注册完成后 daemon 才会创建它。
+# 大内存池的注册可能要几十秒，所以启动探针给得宽一些（默认 2s × 150 = 5 分钟）
+startupProbe:
+  periodSeconds: 2
+  failureThreshold: 150
+
+readinessProbe:
+  periodSeconds: 10

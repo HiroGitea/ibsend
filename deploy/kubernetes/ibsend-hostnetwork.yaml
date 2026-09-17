@@ -1,0 +1,125 @@
+# 由 deploy/helm/ibsend 生成，不要手改；改完 chart 运行 deploy/kubernetes/render.sh。
+# 等价于：helm template ibsend deploy/helm/ibsend --namespace ibsend
+#
+# 部署：kubectl apply -f deploy/kubernetes/namespace.yaml -f deploy/kubernetes/ibsend-hostnetwork.yaml
+# 镜像默认是 ibsend:<appVersion>，先改成你推送到镜像仓库的地址。
+---
+# Source: ibsend/templates/daemonset.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ibsend
+  namespace: ibsend
+  labels:
+    helm.sh/chart: ibsend-0.1.0
+    app.kubernetes.io/name: ibsend
+    app.kubernetes.io/instance: ibsend
+    app.kubernetes.io/component: daemon
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ibsend
+      app.kubernetes.io/instance: ibsend
+      app.kubernetes.io/component: daemon
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        helm.sh/chart: ibsend-0.1.0
+        app.kubernetes.io/name: ibsend
+        app.kubernetes.io/instance: ibsend
+        app.kubernetes.io/component: daemon
+        app.kubernetes.io/version: "0.1.0"
+        app.kubernetes.io/managed-by: Helm
+    spec:
+      automountServiceAccountToken: false
+      # rdma_cm 按 IP 找 HCA，Pod 的网络命名空间里必须有 IPoIB 接口
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        fsGroup: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # hostPath 不受 fsGroup 影响，把目录交给运行 ibsend 的用户
+        - name: fix-permissions
+          image: ibsend:0.1.0
+          imagePullPolicy: IfNotPresent
+          command: ["chown", "10001:10001", "/data"]
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+              add: [CHOWN]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      containers:
+        - name: ibsend
+          image: ibsend:0.1.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - daemon
+            - --out
+            - /data
+            - --port
+            - "18515"
+            - --ready-file
+            - /run/ibsend/ready
+            - --name
+            - "$(NODE_NAME)"
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            allowPrivilegeEscalation: true
+            capabilities:
+              add:
+              - IPC_LOCK
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+          resources:
+            limits:
+              rdma/hca_shared_devices_a: 1
+          # 内存池注册完成后 daemon 才创建就绪文件；启动时会先删掉旧的
+          startupProbe:
+            exec:
+              command: ["test", "-f", "/run/ibsend/ready"]
+            failureThreshold: 150
+            periodSeconds: 2
+          readinessProbe:
+            exec:
+              command: ["test", "-f", "/run/ibsend/ready"]
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: run
+              mountPath: /run/ibsend
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          hostPath:
+            path: "/var/lib/ibsend/inbox"
+            type: DirectoryOrCreate
+        - name: run
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        - name: tmp
+          emptyDir: {}

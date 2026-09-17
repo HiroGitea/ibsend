@@ -1,0 +1,43 @@
+# 单机 Docker：常驻一个 ibsend 接收端。
+#
+#   docker build -t ibsend .
+#   mkdir -p deploy/docker/inbox && sudo chown 10001:10001 deploy/docker/inbox
+#   docker compose -f deploy/docker/compose.yaml up -d
+#
+# 收到的文件落在本文件旁边的 inbox/。目录要对容器用户可写：要么像上面那样
+# chown 给 10001，要么设置 IBSEND_UID / IBSEND_GID 为自己的 UID/GID。
+services:
+  ibsend:
+    image: ${IBSEND_IMAGE:-ibsend:latest}
+    # rdma_cm 靠 IPoIB 接口解析地址，发现也要扫它所在的子网
+    network_mode: host
+    devices:
+      - /dev/infiniband:/dev/infiniband
+    # 只保留 IPC_LOCK：RDMA 要 pin 住内存。不要加 no-new-privileges，
+    # 非 root 用户的 IPC_LOCK 来自镜像里的文件能力，带着它就不生效了。
+    cap_drop: [ALL]
+    cap_add: [IPC_LOCK]
+    user: "${IBSEND_UID:-10001}:${IBSEND_GID:-10001}"
+    command:
+      - daemon
+      - --out
+      - /data
+      - --ready-file
+      - /run/ibsend/ready
+      # 发现时显示的名字，默认是主机名
+      # - --name
+      # - nas
+    volumes:
+      - ./inbox:/data
+    read_only: true
+    tmpfs:
+      - /run/ibsend:uid=${IBSEND_UID:-10001},gid=${IBSEND_GID:-10001}
+      - /tmp
+    # 内存池约为限额的 1/3（上限 16 GB）
+    mem_limit: 8g
+    healthcheck:
+      test: ["CMD", "test", "-f", "/run/ibsend/ready"]
+      interval: 30s
+      start_period: 5m
+      start_interval: 2s
+    restart: unless-stopped

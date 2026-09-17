@@ -1,0 +1,30 @@
+ibsend 接收端已部署为 DaemonSet {{ .Release.Namespace }}/{{ include "ibsend.fullname" . }}（网络模式：{{ .Values.network.mode }}）。
+
+查看各节点上的 daemon：
+
+  kubectl -n {{ .Release.Namespace }} get pods -o wide \
+    -l app.kubernetes.io/name={{ include "ibsend.name" . }},app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=daemon
+
+日志和就绪文件（内容里有监听地址和端口）：
+
+  kubectl -n {{ .Release.Namespace }} logs <pod> -c ibsend
+  kubectl -n {{ .Release.Namespace }} exec <pod> -c ibsend -- cat /run/ibsend/ready
+
+Pod 迟迟不 Ready 时，先看日志里的内存池提示{{ if .Values.rdma.resourceName }}，再确认节点上有
+{{ .Values.rdma.resourceName }} 资源：
+
+  kubectl describe node <node> | grep -i rdma{{ else }}，再确认容器里能看到 /dev/infiniband。{{ end }}
+
+收到的文件放在{{ if eq .Values.storage.type "hostPath" }}各节点的 {{ .Values.storage.hostPath.path }}{{ else if eq .Values.storage.type "pvc" }} PVC {{ .Values.storage.pvc.claimName }}{{ else }} emptyDir（Pod 删除后丢失）{{ end }}。
+daemon 的发现名是{{ if .Values.daemon.name }} {{ .Values.daemon.name }}{{ else }}所在节点的节点名{{ end }}，端口 {{ .Values.daemon.port }}。
+
+用 kubectl 插件收发（contrib/kubectl-ibsend，放进 PATH 即可）：
+
+  kubectl ibsend peers -n {{ .Release.Namespace }}
+  kubectl ibsend cp -n {{ .Release.Namespace }} pvc/<数据集>:<目录> node/<节点>:<子目录>
+
+注意：
+  - namespace 必须允许 privileged Pod（pod-security.kubernetes.io/enforce=privileged），
+    baseline 级别不允许 IPC_LOCK 和 hostNetwork，Pod 会被拒绝创建。
+  - rdma_cm 不经过 kube-proxy，Service 对 ibsend 没用；直接用 IPoIB 地址或发现名。
+  - 传输不加密、不认证，只在可信的 IB 网络里使用。

@@ -4,8 +4,18 @@
 //! 算术。所以池子大小按内存容量在启动时定死（要提前注册才能藏掉停顿），
 //! 而 slab 的切法可以等清单到达、知道本次传输多大之后再决定，零成本。
 
-/// 从 /proc/meminfo 读 MemAvailable（字节）
+use std::path::{Path, PathBuf};
+
+/// 可用内存（字节）：MemAvailable 和 cgroup 余量取小。
 pub fn mem_available() -> Option<u64> {
+    match (host_mem_available(), cgroup_mem_headroom()) {
+        (Some(h), Some(c)) => Some(h.min(c)),
+        (h, c) => h.or(c),
+    }
+}
+
+/// 从 /proc/meminfo 读 MemAvailable（字节）
+fn host_mem_available() -> Option<u64> {
     let s = std::fs::read_to_string("/proc/meminfo").ok()?;
     for line in s.lines() {
         if let Some(v) = line.strip_prefix("MemAvailable:") {
@@ -14,6 +24,132 @@ pub fn mem_available() -> Option<u64> {
         }
     }
     None
+}
+
+/// 本进程所在 cgroup 的内存限额（字节），沿层级取最紧的一档。没有限额返回 None。
+pub fn cgroup_mem_limit() -> Option<u64> {
+    cgroup_levels().into_iter().filter_map(|l| l.limit).min()
+}
+
+/// cgroup 里还能再用多少内存（字节）。没有限额返回 None。
+///
+/// 容器里 /proc/meminfo 报的是整台宿主机：Pod 限额 4 GiB、宿主机 256 GiB 时，
+/// 按 MemAvailable 开出来的池子会直接把容器送进 OOM killer。pin 住的页同样
+/// 记在 cgroup 账上，而且回收不掉。
+///
+/// 已用量要减掉 inactive_file（和 kubelet 算 working set 的口径一致）：落盘
+/// 产生的页缓存也记在 cgroup 上，但内核随时能回收，不该算作占用。
+pub fn cgroup_mem_headroom() -> Option<u64> {
+    cgroup_levels().into_iter().filter_map(|l| l.headroom()).min()
+}
+
+/// cgroup 层级里的一档
+#[derive(Debug, Default, PartialEq)]
+struct CgroupLevel {
+    limit: Option<u64>,
+    usage: u64,
+    reclaimable: u64,
+}
+
+impl CgroupLevel {
+    fn headroom(&self) -> Option<u64> {
+        let used = self.usage.saturating_sub(self.reclaimable);
+        self.limit.map(|l| l.saturating_sub(used))
+    }
+}
+
+/// v1 用一个接近 i64::MAX 的数表示不限（按页对齐，各内核不完全一样）
+const CGROUP_V1_UNLIMITED: u64 = 1 << 62;
+
+fn read_trim(p: &Path) -> Option<String> {
+    std::fs::read_to_string(p).ok().map(|s| s.trim().to_string())
+}
+
+fn parse_limit(s: &str) -> Option<u64> {
+    if s == "max" {
+        return None;
+    }
+    s.parse().ok().filter(|&v| v < CGROUP_V1_UNLIMITED)
+}
+
+fn stat_value(stat: &str, key: &str) -> Option<u64> {
+    stat.lines().find_map(|l| {
+        let (k, v) = l.split_once(' ')?;
+        if k == key { v.trim().parse().ok() } else { None }
+    })
+}
+
+/// /proc/self/cgroup 里我们关心的那条路径：v2 是 `0::<path>`，v1 是带 memory
+/// 控制器的那一行。返回 (是否 v2, 路径)。
+fn parse_proc_cgroup(s: &str) -> Option<(bool, String)> {
+    let mut v2 = None;
+    for line in s.lines() {
+        let mut it = line.splitn(3, ':');
+        let (id, ctrls, path) = (it.next()?, it.next()?, it.next()?);
+        if ctrls.split(',').any(|c| c == "memory") {
+            return Some((false, path.to_string()));
+        }
+        if id == "0" && ctrls.is_empty() {
+            v2 = Some((true, path.to_string()));
+        }
+    }
+    v2
+}
+
+/// 从本进程的 cgroup 往上走到挂载点，逐级读限额和用量。
+///
+/// 有 cgroup 命名空间时（容器里的常态）路径就是 `/`，挂载点本身就是自己那一级；
+/// 没有命名空间但挂载点只露出了自己那棵子树时（v1 下的 Docker），拼出来的路径
+/// 不存在，退回挂载点本身。
+fn cgroup_levels() -> Vec<CgroupLevel> {
+    let Some((v2, rel)) = std::fs::read_to_string("/proc/self/cgroup")
+        .ok()
+        .and_then(|s| parse_proc_cgroup(&s))
+    else {
+        return Vec::new();
+    };
+    let root = PathBuf::from(if v2 { "/sys/fs/cgroup" } else { "/sys/fs/cgroup/memory" });
+    let mut dir = root.join(rel.trim_start_matches('/'));
+    if rel.contains("..") || !dir.is_dir() {
+        dir = root.clone();
+    }
+
+    let mut out = Vec::new();
+    loop {
+        let level = if v2 { read_v2_level(&dir) } else { read_v1_level(&dir) };
+        match level {
+            Some(l) => out.push(l),
+            None => break, // v2 的根没有 memory.max，走到这里就到头了
+        }
+        // v1 的 hierarchical_memory_limit 已经包含了祖先的限额，读一级就够
+        if !v2 || dir == root || !dir.pop() {
+            break;
+        }
+    }
+    out
+}
+
+fn read_v2_level(dir: &Path) -> Option<CgroupLevel> {
+    let limit = parse_limit(&read_trim(&dir.join("memory.max"))?);
+    let usage = read_trim(&dir.join("memory.current"))?.parse().ok()?;
+    let stat = read_trim(&dir.join("memory.stat")).unwrap_or_default();
+    Some(CgroupLevel { limit, usage, reclaimable: stat_value(&stat, "inactive_file").unwrap_or(0) })
+}
+
+fn read_v1_level(dir: &Path) -> Option<CgroupLevel> {
+    let own = parse_limit(&read_trim(&dir.join("memory.limit_in_bytes"))?);
+    let usage = read_trim(&dir.join("memory.usage_in_bytes"))?.parse().ok()?;
+    let stat = read_trim(&dir.join("memory.stat")).unwrap_or_default();
+    let inherited = stat_value(&stat, "hierarchical_memory_limit").filter(|&v| v < CGROUP_V1_UNLIMITED);
+    let limit = match (own, inherited) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    Some(CgroupLevel {
+        limit,
+        usage,
+        reclaimable: stat_value(&stat, "total_inactive_file").unwrap_or(0),
+    })
 }
 
 /// 本进程是否持有 CAP_IPC_LOCK。
@@ -91,12 +227,18 @@ pub fn memlock_headroom() -> Option<u64> {
 /// 所以上限没必要开得过分大。
 /// 不考虑 memlock 时想要多大
 fn pool_want(user: Option<u64>) -> u64 {
-    match user {
+    let want = match user {
         Some(u) => u.max(4 << 20),
         None => {
             let avail = mem_available().unwrap_or(2 << 30);
             (avail / 3).clamp(256 << 20, 16u64 << 30)
         }
+    };
+    // 显式指定的大小、以及自动模式的 256 MB 下限都可能超过 cgroup 限额。
+    // 超了就是 OOM kill，没有商量余地；留 1/4 给落盘线程和页缓存。
+    match cgroup_mem_headroom() {
+        Some(head) => want.min(head - head / 4).max(1 << 20),
+        None => want,
     }
 }
 
@@ -108,6 +250,20 @@ pub fn pool_ceiling(user: Option<u64>) -> u64 {
         // 进程，不留这一半的话发送必然失败。
         Some(head) => want.min(head / 2).max(1 << 20),
         None => want,
+    }
+}
+
+/// 发送端还能 pin 多少（字节），0 表示不限。
+///
+/// memlock 余量留 1/8 给 CQ/QP 和控制通道自己的缓冲，它们同样计入 memlock；
+/// cgroup 余量只拿一半，另一半留给读盘产生的页缓存和进程本身。
+pub fn pin_budget() -> u64 {
+    let lock = memlock_headroom().map(|h| h - h / 8);
+    let cg = cgroup_mem_headroom().map(|h| h / 2);
+    match (lock, cg) {
+        (Some(a), Some(b)) => a.min(b).max(1),
+        (Some(v), None) | (None, Some(v)) => v.max(1), // 0 在协议里表示不限
+        (None, None) => 0,
     }
 }
 
@@ -280,6 +436,51 @@ mod tests {
             let two = pool_alloc_size(2 * slab);
             assert!(two <= budget, "预算 {budget}：2 个 {slab} 的块对齐后要 {two}，超了");
             assert!(slab * n as u64 <= 16 * G);
+        }
+    }
+
+    #[test]
+    fn 认得出_cgroup_路径() {
+        assert_eq!(parse_proc_cgroup("0::/\n"), Some((true, "/".into())));
+        assert_eq!(
+            parse_proc_cgroup("0::/kubepods.slice/kubepods-pod1.slice/cri-containerd-a.scope\n"),
+            Some((true, "/kubepods.slice/kubepods-pod1.slice/cri-containerd-a.scope".into()))
+        );
+        // v1：只认带 memory 控制器的那一行，哪怕它和别的控制器挂在一起
+        let v1 = "12:cpu,cpuacct:/docker/abc\n4:memory:/docker/abc\n0::/\n";
+        assert_eq!(parse_proc_cgroup(v1), Some((false, "/docker/abc".into())));
+        assert_eq!(parse_proc_cgroup("3:cpuset,memory:/x\n"), Some((false, "/x".into())));
+        assert_eq!(parse_proc_cgroup(""), None);
+    }
+
+    #[test]
+    fn cgroup_限额和余量() {
+        assert_eq!(parse_limit("max"), None);
+        assert_eq!(parse_limit("4294967296"), Some(4 * G));
+        assert_eq!(parse_limit("9223372036854771712"), None, "v1 的「不限」");
+        assert_eq!(parse_limit("垃圾"), None);
+
+        let stat = "anon 1024\nfile 900\ninactive_file 512\nactive_file 388\n";
+        assert_eq!(stat_value(stat, "inactive_file"), Some(512));
+        assert_eq!(stat_value(stat, "file"), Some(900), "不能被 inactive_file 之类的前缀误伤");
+        assert_eq!(stat_value(stat, "missing"), None);
+
+        // 页缓存能回收，不算占用
+        let l = CgroupLevel { limit: Some(4 * G), usage: G, reclaimable: G / 2 };
+        assert_eq!(l.headroom(), Some(4 * G - G / 2));
+        let over = CgroupLevel { limit: Some(G), usage: 2 * G, reclaimable: 0 };
+        assert_eq!(over.headroom(), Some(0), "超额时余量为 0 而不是回绕");
+        assert_eq!(CgroupLevel { limit: None, usage: G, reclaimable: 0 }.headroom(), None);
+    }
+
+    #[test]
+    fn 池子不超过_cgroup_余量() {
+        if let Some(head) = cgroup_mem_headroom() {
+            assert!(pool_ceiling(Some(1 << 40)) <= head.max(1 << 20), "显式指定超大也不能超过容器限额");
+        }
+        let b = pin_budget();
+        if memlock_headroom().is_some() || cgroup_mem_headroom().is_some() {
+            assert!(b > 0, "有限额时预算不能是 0，0 在协议里表示不限");
         }
     }
 

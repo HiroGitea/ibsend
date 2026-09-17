@@ -1,0 +1,187 @@
+{{- $mode := .Values.network.mode }}
+{{- if not (has $mode (list "host" "multus")) }}
+{{- fail (printf "network.mode 只能是 host 或 multus，现在是 %q" $mode) }}
+{{- end }}
+{{- if and (eq $mode "multus") (not .Values.network.multus.networks) }}
+{{- fail "network.mode=multus 时必须设置 network.multus.networks（NetworkAttachmentDefinition 的名字，例如 ipoib-network）" }}
+{{- end }}
+{{- $storage := .Values.storage.type }}
+{{- if not (has $storage (list "hostPath" "pvc" "emptyDir")) }}
+{{- fail (printf "storage.type 只能是 hostPath、pvc 或 emptyDir，现在是 %q" $storage) }}
+{{- end }}
+{{- if and (eq $storage "pvc") (not .Values.storage.pvc.claimName) }}
+{{- fail "storage.type=pvc 时必须设置 storage.pvc.claimName" }}
+{{- end }}
+{{- $resources := deepCopy (.Values.resources | default dict) }}
+{{- if .Values.rdma.resourceName }}
+{{- $limits := get $resources "limits" | default dict }}
+{{- $_ := set $limits .Values.rdma.resourceName (int .Values.rdma.count) }}
+{{- $_ := set $resources "limits" $limits }}
+{{- end }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "ibsend.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ibsend.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "ibsend.selectorLabels" . | nindent 6 }}
+  {{- with .Values.updateStrategy }}
+  updateStrategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  template:
+    metadata:
+      labels:
+        {{- include "ibsend.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- if or .Values.podAnnotations (eq $mode "multus") }}
+      annotations:
+        {{- if eq $mode "multus" }}
+        k8s.v1.cni.cncf.io/networks: {{ .Values.network.multus.networks | quote }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      {{- if eq $mode "host" }}
+      # rdma_cm 按 IP 找 HCA，Pod 的网络命名空间里必须有 IPoIB 接口
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if and (eq $storage "hostPath") .Values.storage.hostPath.fixPermissions }}
+      initContainers:
+        # hostPath 不受 fsGroup 影响，把目录交给运行 ibsend 的用户
+        - name: fix-permissions
+          image: {{ include "ibsend.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["chown", {{ include "ibsend.owner" . | quote }}, "/data"]
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+              add: [CHOWN]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      {{- end }}
+      containers:
+        - name: ibsend
+          image: {{ include "ibsend.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - daemon
+            - --out
+            - /data
+            - --port
+            - {{ .Values.daemon.port | int | toString | quote }}
+            - --ready-file
+            - /run/ibsend/ready
+            - --name
+            - {{ .Values.daemon.name | default "$(NODE_NAME)" | quote }}
+            {{- with .Values.daemon.bind }}
+            - --bind
+            - {{ . | quote }}
+            {{- end }}
+            {{- with .Values.daemon.pool }}
+            - --pool
+            - {{ . | quote }}
+            {{- end }}
+            {{- with .Values.daemon.slab }}
+            - --slab
+            - {{ . | quote }}
+            {{- end }}
+            {{- if .Values.daemon.json }}
+            - --json
+            {{- end }}
+            {{- range .Values.daemon.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          # 内存池注册完成后 daemon 才创建就绪文件；启动时会先删掉旧的
+          startupProbe:
+            exec:
+              command: ["test", "-f", "/run/ibsend/ready"]
+            {{- with .Values.startupProbe }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            exec:
+              command: ["test", "-f", "/run/ibsend/ready"]
+            {{- with .Values.readinessProbe }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: run
+              mountPath: /run/ibsend
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          {{- if eq $storage "hostPath" }}
+          hostPath:
+            path: {{ .Values.storage.hostPath.path | quote }}
+            {{- with .Values.storage.hostPath.type }}
+            type: {{ . }}
+            {{- end }}
+          {{- else if eq $storage "pvc" }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.storage.pvc.claimName | quote }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: run
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

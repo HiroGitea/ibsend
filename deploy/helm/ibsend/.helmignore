@@ -1,0 +1,11 @@
+# 打包时忽略的文件
+.DS_Store
+.git/
+.gitignore
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+.vscode/
+.idea/

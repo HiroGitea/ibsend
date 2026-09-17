@@ -1,0 +1,137 @@
+# 场景：训练任务一边训练，一边把写完的 checkpoint 推到存储节点上的 ibsend daemon。
+#
+# 前提：
+#   - Kubernetes ≥ 1.29：用到原生 sidecar（initContainers 里的 restartPolicy: Always），
+#     主容器结束后 sidecar 才收到 SIGTERM，Job 也能正常完成
+#   - 存储节点上跑着 ibsend daemon（Helm chart 默认用节点名作为发现名），
+#     把 TARGET 改成那台节点的名字；写成 IPoIB 地址可以省掉每次的子网扫描
+#   - namespace 允许 privileged（见 ../namespace.yaml），镜像地址改成你推送的那个
+#
+# 约定：训练代码把每个 checkpoint 写进 /ckpt/<step>/，全部写完后再创建
+# /ckpt/<step>/COMPLETE。sidecar 只发带这个标记的目录，发完在 /ckpt/.ibsend-sent/
+# 里记一笔，不会重复发；失败的下一轮重试，续传由 ibsend 自己处理。
+# 文件落在存储节点 inbox 下的 <Job 名>/<step>/（COMPLETE 标记也会一起过去）。
+#
+# 训练镜像里本身有 ibsend 的话，可以不要 sidecar，保存完直接调用：
+#   ibsend send --json --prefix "$JOB_NAME" "$TARGET" /ckpt/<step>
+# 按退出码判断结果：0 成功，1 失败，4 按名字找不到对端。
+#
+# 切换到 Multus：删掉 hostNetwork 和 dnsPolicy，在 Pod 模板的 metadata 里加
+#   annotations:
+#     k8s.v1.cni.cncf.io/networks: ipoib-network
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: train-with-ckpt
+  namespace: ibsend
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: train-with-ckpt
+    spec:
+      restartPolicy: Never
+      # rdma_cm 按 IP 找 HCA，Pod 的网络命名空间里必须有 IPoIB 接口
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      automountServiceAccountToken: false
+      # 主容器结束后，sidecar 要在这段时间内把最后的 checkpoint 发完
+      terminationGracePeriodSeconds: 600
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+        # 两个容器都能读写共享的 /ckpt
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: ckpt-sync
+          image: ibsend:0.1.0
+          # 原生 sidecar：和主容器同时运行，主容器结束后才被停止
+          restartPolicy: Always
+          env:
+            - name: TARGET
+              value: storage-node-1
+            - name: INTERVAL
+              value: "30"
+            - name: JOB_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['batch.kubernetes.io/job-name']
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -u
+              sent=/ckpt/.ibsend-sent
+              mkdir -p "$sent"
+
+              sync_once() {
+                  for mark in /ckpt/*/COMPLETE; do
+                      [ -e "$mark" ] || continue
+                      dir=${mark%/COMPLETE}
+                      step=${dir##*/}
+                      [ -e "$sent/$step" ] && continue
+                      if ibsend send --prefix "$JOB_NAME" "$TARGET" "$dir"; then
+                          touch "$sent/$step"
+                      else
+                          echo "发送 $step 失败（退出码 $?），下一轮重试" >&2
+                      fi
+                  done
+              }
+
+              # 收到 SIGTERM（主容器已结束）时最后同步一遍再退出。
+              # sleep 放到后台再 wait，trap 才能立即生效，不用等 sleep 睡完
+              trap 'sync_once; exit 0' TERM
+              while :; do
+                  sync_once
+                  sleep "$INTERVAL" &
+                  wait $!
+              done
+          securityContext:
+            # 必须为 true：ibsend 靠文件能力拿 IPC_LOCK，no_new_privs 会让它失效
+            allowPrivilegeEscalation: true
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+              add: [IPC_LOCK]
+          resources:
+            limits:
+              # 发送端的本地缓冲很小，内存限额不用给多
+              memory: 1Gi
+              rdma/hca_shared_devices_a: 1
+          volumeMounts:
+            - name: ckpt
+              mountPath: /ckpt
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: train
+          # 占位：换成真正的训练镜像。这里每 60 秒模拟写一个 checkpoint
+          image: ibsend:0.1.0
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              for step in 1 2 3; do
+                  sleep 60
+                  dir=/ckpt/step-$step
+                  mkdir -p "$dir"
+                  head -c 64M /dev/urandom > "$dir/model.bin"
+                  touch "$dir/COMPLETE"
+                  echo "checkpoint $step 已写完"
+              done
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: ckpt
+              mountPath: /ckpt
+      volumes:
+        - name: ckpt
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

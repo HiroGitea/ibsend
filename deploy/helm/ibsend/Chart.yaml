@@ -1,0 +1,15 @@
+apiVersion: v2
+name: ibsend
+description: Run the ibsend receiver on every InfiniBand node for fast RDMA file transfers.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/HiroGitea/ibsend
+sources:
+  - https://github.com/HiroGitea/ibsend
+keywords:
+  - rdma
+  - infiniband
+  - file-transfer
+annotations:
+  artifacthub.io/license: MIT OR Apache-2.0

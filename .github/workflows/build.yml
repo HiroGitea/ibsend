@@ -55,3 +55,35 @@ jobs:
             docs/README.ja.md
             LICENSE-MIT
             LICENSE-APACHE
+
+  container:
+    name: Container image · Kubernetes files
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t ibsend:ci .
+
+      # 没给 IPC_LOCK 时入口脚本要退回普通二进制，而不是 execve 失败
+      - name: Check image entrypoint
+        run: |
+          docker run --rm ibsend:ci authorize
+          docker run --rm --cap-drop ALL --cap-add IPC_LOCK ibsend:ci authorize 2>&1 \
+            | tee /dev/stderr | grep -q '已经有内存锁定权限'
+
+      - name: Check shell scripts
+        run: shellcheck deploy/docker/entrypoint.sh deploy/kubernetes/render.sh contrib/kubectl-ibsend
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Lint Helm chart
+        run: helm lint --strict deploy/helm/ibsend
+
+      - name: Check rendered manifests are up to date
+        run: |
+          deploy/kubernetes/render.sh
+          git diff --exit-code deploy/kubernetes

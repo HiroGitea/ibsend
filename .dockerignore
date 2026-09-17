@@ -1,0 +1,9 @@
+*
+!Cargo.toml
+!Cargo.lock
+!build.rs
+!csrc/
+!src/
+!deploy/docker/entrypoint.sh
+!LICENSE-MIT
+!LICENSE-APACHE

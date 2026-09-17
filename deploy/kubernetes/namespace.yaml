@@ -1,0 +1,13 @@
+# ibsend 用的 namespace。
+#
+# Pod Security 必须是 privileged：ibsend 需要 IPC_LOCK 能力（pin 内存），
+# hostNetwork 模式还要用宿主机网络，这两样 baseline 级别都不允许。
+# 能力只加 IPC_LOCK，其余全部 drop，见 chart 里的 securityContext。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ibsend
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged

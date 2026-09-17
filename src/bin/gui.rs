@@ -392,6 +392,8 @@ impl App {
                         if busy {
                             ui.spinner();
                         }
+                    } else if authorize::in_container() {
+                        ui.colored_label(DIM, authorize::container_hint());
                     } else {
                         ui.colored_label(DIM, "（无图形会话，跑 ibsend authorize）");
                     }

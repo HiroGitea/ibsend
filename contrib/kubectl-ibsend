@@ -1,0 +1,777 @@
+#!/bin/sh
+# kubectl ibsend —— 在 Kubernetes 集群里用 ibsend 搬数据。
+#
+# 安装：把这个文件放进 PATH（文件名保持 kubectl-ibsend），kubectl 会自动把它
+# 当成插件：
+#
+#   install -m 0755 contrib/kubectl-ibsend ~/.local/bin/
+#   kubectl ibsend help
+#
+# 只依赖 kubectl 和 POSIX 工具（sed、awk、od）。它临时起收发 Pod，传完就删；
+# 节点上常驻的接收端由 Helm chart（deploy/helm/ibsend）部署。
+set -eu
+
+VERSION=0.1.0
+PROG='kubectl ibsend'
+
+usage() {
+    cat <<'EOF'
+用法：
+  kubectl ibsend cp <源> <目标> [选项]
+  kubectl ibsend peers [选项]
+  kubectl ibsend version
+  kubectl ibsend help
+
+源：
+  pvc/<名字>[:<路径>]      PVC 里的数据。路径相对卷根；是目录就发送目录里的内容，
+                           是文件就发送这个文件；省略时发送整个卷的内容
+  node/<节点>:<绝对路径>   节点上的文件或目录（hostPath 只读挂载），规则同上
+
+目标：
+  node/<节点>[:<子目录>]   该节点上常驻的 ibsend daemon，放进它落盘目录下的子目录
+  pvc/<名字>[:<子目录>]    一个 PVC；会临时起一个接收 Pod
+
+cp 选项：
+  -n, --namespace <NS>       临时 Pod 和 PVC 所在的命名空间（默认取当前上下文）
+      --daemon-namespace <NS>
+                             daemon 所在的命名空间（默认 ibsend）
+      --selector <SEL>       daemon Pod 的标签选择器（默认
+                             app.kubernetes.io/name=ibsend,app.kubernetes.io/component=daemon）
+      --image <IMAGE>        镜像（环境变量 IBSEND_IMAGE，默认 ibsend:0.1.0）
+      --network <MODE>       host 或 multus:<NetworkAttachmentDefinition>
+                             （环境变量 IBSEND_NETWORK，默认 host）
+      --rdma-resource <NAME> RDMA 扩展资源名，传空字符串就不申请（环境变量
+                             IBSEND_RDMA_RESOURCE，默认 rdma/hca_shared_devices_a）
+      --uid <UID>            临时 Pod 的用户（默认 10001；读 root 的文件时用 0）
+      --memory <SIZE>        临时 Pod 的内存限额，决定内存池大小（默认 4Gi）
+      --port <PORT>          临时接收端的端口（默认在 20000-29999 里随机取，
+                             避免 hostNetwork 下和 daemon 的 18515 冲突）
+      --timeout <SEC>        等 Pod 启动、就绪的上限（默认 300）
+      --json                 stdout 上每行一个 JSON 事件，带 "source" 字段
+                             （sender / receiver）
+      --keep                 传完不删除临时 Pod，便于排错
+      --dry-run              只打印要创建的 Pod 清单，不访问集群
+      --context <CTX>        使用 kubeconfig 里的这个上下文
+      --kubeconfig <FILE>    使用这个 kubeconfig 文件
+
+peers 选项：
+  -n, --namespace <NS>       daemon 所在的命名空间（默认 ibsend）
+      --selector <SEL>、--context、--kubeconfig
+                             同上
+
+退出码：0 成功；1 失败；2 用法错误；3 数据校验失败；4 找不到对端。
+传输失败时退出码取自发送端或接收端的 ibsend。
+
+示例：
+  kubectl ibsend peers
+  kubectl ibsend cp pvc/datasets:imagenet node/gpu-3:datasets/imagenet
+  kubectl ibsend cp pvc/old-data pvc/new-data -n team-a
+  kubectl ibsend cp node/gpu-1:/nvme/ckpt/step-1000 pvc/checkpoints:run-42 --uid 0
+EOF
+}
+
+say() { printf '%s\n' "$*" >&2; }
+die() { say "$PROG: $*"; exit 1; }
+bad_usage() {
+    say "$PROG: $*"
+    say "运行 \`$PROG help\` 查看用法"
+    exit 2
+}
+
+# ---------------- 参数 ----------------
+
+NS=
+DNS=ibsend
+SEL='app.kubernetes.io/name=ibsend,app.kubernetes.io/component=daemon'
+IMAGE=${IBSEND_IMAGE:-ibsend:0.1.0}
+NETWORK=${IBSEND_NETWORK:-host}
+# 用 - 而不是 :-：显式设成空字符串表示不申请 RDMA 资源
+RDMA=${IBSEND_RDMA_RESOURCE-rdma/hca_shared_devices_a}
+RUN_UID=10001
+MEMORY=4Gi
+PORT=
+TIMEOUT=300
+JSON=0
+KEEP=0
+DRY=0
+KCTX=
+KCFG=
+SRC=
+DST=
+NPOS=0
+
+[ $# -gt 0 ] || { usage >&2; exit 2; }
+CMD=$1
+shift
+case $CMD in
+    help | -h | --help) usage; exit 0 ;;
+    version | --version) printf 'kubectl-ibsend %s\n' "$VERSION"; exit 0 ;;
+    cp | peers) ;;
+    *) bad_usage "未知命令：$CMD" ;;
+esac
+
+need() {
+    [ $# -ge 2 ] || bad_usage "$1 需要一个值"
+}
+
+add_pos() {
+    NPOS=$((NPOS + 1))
+    case $NPOS in
+        1) SRC=$1 ;;
+        2) DST=$1 ;;
+        *) bad_usage "多余的参数：$1" ;;
+    esac
+}
+
+while [ $# -gt 0 ]; do
+    case $1 in
+        -n | --namespace) need "$@"; NS=$2; shift 2 ;;
+        --daemon-namespace) need "$@"; DNS=$2; shift 2 ;;
+        -l | --selector) need "$@"; SEL=$2; shift 2 ;;
+        --image) need "$@"; IMAGE=$2; shift 2 ;;
+        --network) need "$@"; NETWORK=$2; shift 2 ;;
+        --rdma-resource) need "$@"; RDMA=$2; shift 2 ;;
+        --uid) need "$@"; RUN_UID=$2; shift 2 ;;
+        --memory) need "$@"; MEMORY=$2; shift 2 ;;
+        --port) need "$@"; PORT=$2; shift 2 ;;
+        --timeout) need "$@"; TIMEOUT=$2; shift 2 ;;
+        --context) need "$@"; KCTX=$2; shift 2 ;;
+        --kubeconfig) need "$@"; KCFG=$2; shift 2 ;;
+        --json) JSON=1; shift ;;
+        --keep) KEEP=1; shift ;;
+        --dry-run) DRY=1; shift ;;
+        -h | --help) usage; exit 0 ;;
+        --)
+            shift
+            for a in "$@"; do add_pos "$a"; done
+            break
+            ;;
+        --*=*)
+            # --opt=value 拆成 --opt value 再走一遍
+            opt=${1%%=*}
+            val=${1#*=}
+            shift
+            set -- "$opt" "$val" "$@"
+            ;;
+        -?*) bad_usage "未知选项：$1" ;;
+        *) add_pos "$1"; shift ;;
+    esac
+done
+
+# 十进制整数，不带前导零（sh 的算术会把 010 当成八进制）
+is_uint() {
+    case $1 in
+        '' | *[!0-9]* | 0?*) return 1 ;;
+    esac
+}
+
+# DNS-1123 名字：命名空间、PVC、节点
+valid_name() {
+    case $1 in
+        '' | *[!a-z0-9.-]*) return 1 ;;
+    esac
+}
+
+is_uint "$TIMEOUT" && [ "$TIMEOUT" -gt 0 ] || bad_usage "--timeout 需要正整数：$TIMEOUT"
+is_uint "$RUN_UID" || bad_usage "--uid 需要非负整数：$RUN_UID"
+if [ -n "$PORT" ]; then
+    is_uint "$PORT" && [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || bad_usage "--port 需要 1-65535：$PORT"
+fi
+case $MEMORY in
+    [0-9]*) case $MEMORY in *[!0-9A-Za-z.]*) bad_usage "--memory 不是合法的数量：$MEMORY" ;; esac ;;
+    *) bad_usage "--memory 不是合法的数量：$MEMORY" ;;
+esac
+case $RDMA in
+    *[!A-Za-z0-9./_-]*) bad_usage "--rdma-resource 不是合法的资源名：$RDMA" ;;
+esac
+case $IMAGE in
+    '' | *[[:space:][:cntrl:]]*) bad_usage "--image 不合法：$IMAGE" ;;
+esac
+case $NETWORK in
+    host) ;;
+    multus:?*)
+        case ${NETWORK#multus:} in
+            *[!a-z0-9./-]*) bad_usage "NetworkAttachmentDefinition 名字不合法：${NETWORK#multus:}" ;;
+        esac
+        ;;
+    *) bad_usage "--network 只能是 host 或 multus:<NetworkAttachmentDefinition>：$NETWORK" ;;
+esac
+[ -z "$NS" ] || valid_name "$NS" || bad_usage "命名空间不合法：$NS"
+valid_name "$DNS" || bad_usage "命名空间不合法：$DNS"
+
+# ---------------- 工具 ----------------
+
+k() {
+    if [ -n "$KCTX" ]; then set -- --context "$KCTX" "$@"; fi
+    if [ -n "$KCFG" ]; then set -- --kubeconfig "$KCFG" "$@"; fi
+    kubectl "$@"
+}
+
+# 同 k，但用 exec 顶替当前进程。放到后台跑时 $! 就是 kubectl 本身，杀得掉。
+kx() {
+    if [ -n "$KCTX" ]; then set -- --context "$KCTX" "$@"; fi
+    if [ -n "$KCFG" ]; then set -- --kubeconfig "$KCFG" "$@"; fi
+    exec kubectl "$@"
+}
+
+need_kubectl() {
+    command -v kubectl >/dev/null 2>&1 || die "找不到 kubectl"
+}
+
+# YAML 双引号字符串。调用前值已经过校验，不含控制字符。
+yaml_str() {
+    printf '"%s"' "$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+}
+
+# 规整相对路径：去掉多余的 / 和 .；含 .. 时返回失败
+relpath() {
+    out=
+    rest=$1
+    while [ -n "$rest" ]; do
+        comp=${rest%%/*}
+        case $rest in
+            */*) rest=${rest#*/} ;;
+            *) rest= ;;
+        esac
+        case $comp in
+            '' | .) ;;
+            ..) return 1 ;;
+            *) out=${out:+$out/}$comp ;;
+        esac
+    done
+    printf '%s' "$out"
+}
+
+# 从就绪文件那行扁平 JSON 里取一个字段
+json_field() {
+    printf '%s\n' "$1" | sed -n "s/.*\"$2\":\"\{0,1\}\([^\",}]*\).*/\1/p" | head -n 1
+}
+
+# 就绪文件内容；读不到返回失败
+read_ready() {
+    k exec -n "$1" "$2" -c ibsend -- cat /run/ibsend/ready </dev/null 2>/dev/null
+}
+
+# ---------------- peers ----------------
+
+if [ "$CMD" = peers ]; then
+    [ "$NPOS" -eq 0 ] || bad_usage "peers 不接受位置参数：$SRC"
+    [ -z "$NS" ] || DNS=$NS
+    need_kubectl
+    list=$(k get pods -n "$DNS" -l "$SEL" -o 'jsonpath={range .items[*]}{.spec.nodeName}{"|"}{.metadata.name}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}') ||
+        die "列不出 daemon Pod"
+    [ -n "$list" ] || die "命名空间 $DNS 里没有 ibsend daemon（选择器 $SEL）"
+    row='%-24s %-32s %-6s %-16s %-6s %s\n'
+    # shellcheck disable=SC2059 # 格式串是上面的常量
+    printf "$row" NODE POD READY ADDRESS PORT NAME
+    printf '%s\n' "$list" | sort | while IFS='|' read -r node pod ready; do
+        [ -n "$pod" ] || continue
+        line=$(read_ready "$DNS" "$pod") || line=
+        addr=$(json_field "$line" bind)
+        port=$(json_field "$line" port)
+        name=$(json_field "$line" name)
+        # shellcheck disable=SC2059
+        printf "$row" "${node:--}" "$pod" "${ready:--}" "${addr:--}" "${port:--}" "${name:--}"
+    done
+    exit 0
+fi
+
+# ---------------- cp：解析源和目标 ----------------
+
+[ "$NPOS" -eq 2 ] || bad_usage "cp 需要 <源> 和 <目标> 两个参数"
+
+# 设置 REF_KIND REF_NAME REF_PATH
+parse_ref() {
+    case $1 in
+        pvc/?* | node/?*) ;;
+        *) bad_usage "$2必须是 pvc/<名字>[:<路径>] 或 node/<节点>[:<路径>]：$1" ;;
+    esac
+    REF_KIND=${1%%/*}
+    rest=${1#*/}
+    case $rest in
+        *:*) REF_NAME=${rest%%:*}; REF_PATH=${rest#*:} ;;
+        *) REF_NAME=$rest; REF_PATH= ;;
+    esac
+    valid_name "$REF_NAME" || bad_usage "$2的名字不合法：$REF_NAME"
+    case $REF_PATH in
+        *[[:cntrl:]]*) bad_usage "$2的路径里不能有控制字符" ;;
+    esac
+}
+
+parse_ref "$SRC" 源
+SRC_KIND=$REF_KIND
+SRC_NAME=$REF_NAME
+SRC_HOST=
+if [ "$SRC_KIND" = pvc ]; then
+    rel=$(relpath "$REF_PATH") || bad_usage "源路径不能包含 ..：$REF_PATH"
+    SRC_MOUNT=/src
+    SRC_IN_POD=/src${rel:+/$rel}
+else
+    case $REF_PATH in
+        /*) ;;
+        *) bad_usage "node/ 源需要绝对路径：node/$SRC_NAME:<绝对路径>" ;;
+    esac
+    rel=$(relpath "$REF_PATH") || bad_usage "源路径不能包含 ..：$REF_PATH"
+    [ -n "$rel" ] || bad_usage "不能发送节点的整个根目录"
+    SRC_HOST=/$rel
+    SRC_MOUNT=/src/${rel##*/}
+    SRC_IN_POD=$SRC_MOUNT
+fi
+
+parse_ref "$DST" 目标
+DST_KIND=$REF_KIND
+DST_NAME=$REF_NAME
+if [ "$DST_KIND" = node ]; then
+    case $REF_PATH in
+        /*) bad_usage "目标子目录相对 daemon 的落盘目录，不能以 / 开头：$REF_PATH" ;;
+    esac
+fi
+dir=$(relpath "$REF_PATH") || bad_usage "目标子目录不能包含 ..：$REF_PATH"
+PREFIX=
+RECV_OUT=/data
+if [ "$DST_KIND" = node ]; then
+    PREFIX=$dir
+else
+    RECV_OUT=/data${dir:+/$dir}
+fi
+
+ID=$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')
+SEND_POD=ibsend-send-$ID
+RECV_POD=ibsend-recv-$ID
+if [ -z "$PORT" ]; then
+    PORT=$(($(od -An -N2 -tu2 /dev/urandom | tr -d ' \n') % 10000 + 20000))
+fi
+
+# ---------------- 清单 ----------------
+
+# 发送 Pod 里跑的脚本。源路径经环境变量传入，不拼进脚本文本。
+SEND_SCRIPT=$(
+    cat <<'EOS'
+# $IBSEND_SRC 是目录就发送它里面的条目（含点文件，跳过 lost+found），
+# 否则发送这个文件本身。前面的参数是 ibsend send 的选项和对端地址。
+p=$IBSEND_SRC
+if [ -d "$p" ]; then
+  n=0
+  for f in "$p"/* "$p"/.[!.]* "$p"/..?*; do
+    { [ -e "$f" ] || [ -L "$f" ]; } || continue
+    [ "${f##*/}" = lost+found ] && continue
+    set -- "$@" "$f"
+    n=$((n + 1))
+  done
+  if [ "$n" -eq 0 ]; then
+    echo "源目录是空的：$p" >&2
+    exit 1
+  fi
+elif [ -e "$p" ]; then
+  set -- "$@" "$p"
+else
+  echo "源路径不存在：$p" >&2
+  exit 1
+fi
+exec /usr/local/bin/ibsend send "$@"
+EOS
+)
+
+# $1 Pod 名，$2 固定到的节点（可空）
+pod_head() {
+    cat <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $1
+  namespace: $(yaml_str "$NS")
+  labels:
+    app.kubernetes.io/name: ibsend
+    app.kubernetes.io/component: transfer
+    app.kubernetes.io/instance: "$ID"
+EOF
+    case $NETWORK in
+        multus:*)
+            printf '  annotations:\n    k8s.v1.cni.cncf.io/networks: %s\n' "$(yaml_str "${NETWORK#multus:}")"
+            ;;
+    esac
+    cat <<'EOF'
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  terminationGracePeriodSeconds: 10
+EOF
+    if [ "$NETWORK" = host ]; then
+        printf '  hostNetwork: true\n  dnsPolicy: ClusterFirstWithHostNet\n'
+    fi
+    if [ -n "$2" ]; then
+        # 和 DaemonSet 一样用 matchFields 固定节点；nodeName 会绕过调度器对
+        # RDMA 扩展资源的检查
+        cat <<EOF
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchFields:
+              - key: metadata.name
+                operator: In
+                values:
+                  - $(yaml_str "$2")
+EOF
+    fi
+    printf '  securityContext:\n    runAsUser: %s\n    runAsGroup: %s\n' "$RUN_UID" "$RUN_UID"
+    if [ "$RUN_UID" = 0 ]; then
+        printf '    runAsNonRoot: false\n'
+    else
+        printf '    runAsNonRoot: true\n    fsGroup: %s\n' "$RUN_UID"
+    fi
+    printf '    seccompProfile:\n      type: RuntimeDefault\n'
+    printf '  containers:\n    - name: ibsend\n      image: %s\n' "$(yaml_str "$IMAGE")"
+}
+
+# 容器里和角色无关的部分：安全设置、资源、公共挂载
+container_tail() {
+    cat <<EOF
+      securityContext:
+        # 镜像靠文件能力授予 IPC_LOCK，execve 时必须允许提权
+        allowPrivilegeEscalation: true
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+          add: ["IPC_LOCK"]
+      resources:
+        limits:
+          memory: $(yaml_str "$MEMORY")
+EOF
+    if [ -n "$RDMA" ]; then
+        printf '          %s: 1\n' "$(yaml_str "$RDMA")"
+    fi
+    cat <<'EOF'
+      volumeMounts:
+        - name: run
+          mountPath: /run/ibsend
+        - name: tmp
+          mountPath: /tmp
+EOF
+}
+
+volumes_head() {
+    cat <<'EOF'
+  volumes:
+    - name: run
+      emptyDir:
+        medium: Memory
+        sizeLimit: 1Mi
+    - name: tmp
+      emptyDir: {}
+EOF
+}
+
+# $1 固定到的节点
+recv_manifest() {
+    pod_head "$RECV_POD" "$1"
+    cat <<EOF
+      args:
+        - recv
+        - --out
+        - $(yaml_str "$RECV_OUT")
+        - --port
+        - "$PORT"
+        - --name
+        - $RECV_POD
+        - --ready-file
+        - /run/ibsend/ready
+EOF
+    if [ "$JSON" = 1 ]; then
+        printf '        - --json\n'
+    fi
+    cat <<'EOF'
+      readinessProbe:
+        exec:
+          command: ["test", "-f", "/run/ibsend/ready"]
+        periodSeconds: 2
+EOF
+    container_tail
+    printf '        - name: data\n          mountPath: /data\n'
+    volumes_head
+    printf '    - name: data\n      persistentVolumeClaim:\n        claimName: %s\n' "$(yaml_str "$DST_NAME")"
+}
+
+# $1 固定到的节点，$2 对端地址，$3 对端端口
+send_manifest() {
+    pod_head "$SEND_POD" "$1"
+    cat <<EOF
+      command:
+        - /usr/bin/tini
+        - "--"
+        - /bin/sh
+        - -c
+        - |
+$(printf '%s\n' "$SEND_SCRIPT" | sed 's/^/          /')
+        - ibsend-send
+      args:
+        - --port
+        - $(yaml_str "$3")
+EOF
+    if [ -n "$PREFIX" ]; then
+        printf '        - --prefix\n        - %s\n' "$(yaml_str "$PREFIX")"
+    fi
+    if [ "$JSON" = 1 ]; then
+        printf '        - --json\n'
+    fi
+    printf '        - %s\n' "$(yaml_str "$2")"
+    printf '      env:\n        - name: IBSEND_SRC\n          value: %s\n' "$(yaml_str "$SRC_IN_POD")"
+    container_tail
+    printf '        - name: src\n          mountPath: %s\n          readOnly: true\n' "$(yaml_str "$SRC_MOUNT")"
+    volumes_head
+    if [ "$SRC_KIND" = pvc ]; then
+        printf '    - name: src\n      persistentVolumeClaim:\n        claimName: %s\n        readOnly: true\n' \
+            "$(yaml_str "$SRC_NAME")"
+    else
+        printf '    - name: src\n      hostPath:\n        path: %s\n' "$(yaml_str "$SRC_HOST")"
+    fi
+}
+
+if [ "$DRY" = 1 ]; then
+    [ -n "$NS" ] || NS=default
+    pin=
+    if [ "$SRC_KIND" = node ]; then
+        pin=$SRC_NAME
+    fi
+    if [ "$DST_KIND" = pvc ]; then
+        recv_manifest ""
+        printf -- '---\n'
+        send_manifest "$pin" RECEIVER_ADDRESS "$PORT"
+        say "# 接收端的地址要等它就绪后才知道，这里用 RECEIVER_ADDRESS 占位"
+    else
+        send_manifest "$pin" DAEMON_ADDRESS DAEMON_PORT
+        say "# daemon 的地址和端口运行时从节点 $DST_NAME 上的就绪文件读取，这里用占位符"
+    fi
+    if [ "$SRC_KIND" = pvc ]; then
+        say "# 源 PVC 已被某个 Pod 挂载时，实际运行会把发送端固定到那个节点"
+    fi
+    exit 0
+fi
+
+# ---------------- cp：执行 ----------------
+
+need_kubectl
+if [ -z "$NS" ]; then
+    NS=$(k config view --minify -o 'jsonpath={..namespace}' 2>/dev/null || true)
+    NS=${NS:-default}
+fi
+
+CREATED=0
+LOGS_PID=
+TMPD=
+# shellcheck disable=SC2329 # 由下面的 trap 调用
+cleanup() {
+    rc=$?
+    if [ -n "$LOGS_PID" ]; then
+        kill "$LOGS_PID" 2>/dev/null || true
+    fi
+    if [ -n "$TMPD" ]; then
+        rm -rf "$TMPD"
+    fi
+    if [ "$CREATED" = 1 ]; then
+        sel="app.kubernetes.io/component=transfer,app.kubernetes.io/instance=$ID"
+        if [ "$KEEP" = 1 ]; then
+            say "保留了临时 Pod，排错完用这条命令删除："
+            say "  kubectl delete pod -n $NS -l $sel"
+        elif ! k delete pod -n "$NS" -l "$sel" --ignore-not-found --wait=false >/dev/null 2>&1; then
+            say "$PROG: 清理临时 Pod 失败，请手动执行：kubectl delete pod -n $NS -l $sel"
+        fi
+    fi
+    exit "$rc"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# $@ 是生成清单的命令。CREATED 必须在当前 shell 里设置：管道的各段跑在
+# 子 shell 里，在那边设了也传不回来，清理就会被跳过。
+apply() {
+    CREATED=1
+    "$@" | k apply -f - >&2
+}
+
+pod_phase() {
+    k get pod -n "$NS" "$1" -o 'jsonpath={.status.phase}' 2>/dev/null || true
+}
+
+deadline() {
+    echo $(($(date +%s) + TIMEOUT))
+}
+
+show_events() {
+    say "最近的事件："
+    k describe pod -n "$NS" "$1" 2>/dev/null | sed -n '/^Events:/,$p' >&2 || true
+}
+
+# 正在挂载这个 PVC 的 Running Pod 所在的节点（RWO 卷只能在那里再挂一次）
+pvc_node() {
+    k get pods -n "$NS" -o 'jsonpath={range .items[*]}{.spec.nodeName}{"|"}{.status.phase}{"|"}{range .spec.volumes[*]}{.persistentVolumeClaim.claimName}{" "}{end}{"\n"}{end}' 2>/dev/null |
+        awk -F'|' -v c="$1" '$2 == "Running" && $1 != "" {
+            n = split($3, a, " ")
+            for (i = 1; i <= n; i++) if (a[i] == c) { print $1; exit }
+        }'
+}
+
+wait_started() {
+    end=$(deadline)
+    while :; do
+        case $(pod_phase "$1") in
+            '' | Pending) ;;
+            *) return 0 ;;
+        esac
+        if [ "$(date +%s)" -ge "$end" ]; then
+            say "$PROG: $1 在 ${TIMEOUT}s 内没有启动"
+            show_events "$1"
+            return 1
+        fi
+        sleep 2
+    done
+}
+
+wait_ready() {
+    end=$(deadline)
+    while :; do
+        if k wait -n "$NS" --for=condition=Ready "pod/$1" --timeout=5s >/dev/null 2>&1; then
+            return 0
+        fi
+        case $(pod_phase "$1") in
+            Failed | Succeeded)
+                say "$PROG: $1 还没就绪就退出了："
+                k logs -n "$NS" "$1" --tail=30 >&2 || true
+                return 1
+                ;;
+        esac
+        if [ "$(date +%s)" -ge "$end" ]; then
+            say "$PROG: $1 在 ${TIMEOUT}s 内没有就绪"
+            show_events "$1"
+            return 1
+        fi
+        sleep 1
+    done
+}
+
+# 等 Pod 结束，把容器退出码打印到 stdout
+wait_done() {
+    gone=0
+    while :; do
+        phase=$(pod_phase "$1")
+        case $phase in
+            Succeeded | Failed) break ;;
+            '')
+                gone=$((gone + 1))
+                if [ "$gone" -ge 5 ]; then
+                    say "$PROG: $1 不见了"
+                    echo 1
+                    return 0
+                fi
+                ;;
+            *) gone=0 ;;
+        esac
+        sleep 2
+    done
+    code=$(k get pod -n "$NS" "$1" -o 'jsonpath={.status.containerStatuses[0].state.terminated.exitCode}' 2>/dev/null || true)
+    case $code in
+        '' | *[!0-9]*) if [ "$phase" = Succeeded ]; then code=0; else code=1; fi ;;
+    esac
+    echo "$code"
+}
+
+# JSON 行加上 source 字段；其余的行丢掉（kubectl logs 把 stderr 也混进来了）
+tag_json() {
+    sed -n "s/^{\"event\":\"\([^\"]*\)\"/{\"event\":\"\1\",\"source\":\"$1\"/p"
+}
+
+# 跟发送端的日志直到它结束。kubectl 放在后台、前台用 wait 等：前台命令跑着的
+# 时候 shell 不处理信号，而 wait 会被信号打断，TERM 才能及时触发清理。
+follow_logs() {
+    if [ "$JSON" = 1 ]; then
+        TMPD=$(mktemp -d)
+        mkfifo "$TMPD/logs"
+        tag_json sender <"$TMPD/logs" &
+        tag_pid=$!
+        kx logs -f -n "$NS" "$1" >"$TMPD/logs" 2>/dev/null &
+        LOGS_PID=$!
+        wait "$LOGS_PID" || true
+        wait "$tag_pid" || true
+    else
+        kx logs -f -n "$NS" "$1" >&2 &
+        LOGS_PID=$!
+        wait "$LOGS_PID" || true
+    fi
+    LOGS_PID=
+}
+
+check_addr() {
+    case $1 in
+        '' | *[!0-9.]*) die "$3 的就绪文件里没有可用的地址：$1" ;;
+    esac
+    is_uint "$2" || die "$3 的就绪文件里没有可用的端口：$2"
+}
+
+send_pin=
+if [ "$SRC_KIND" = node ]; then
+    send_pin=$SRC_NAME
+else
+    send_pin=$(pvc_node "$SRC_NAME")
+    if [ -n "$send_pin" ]; then
+        say "源 PVC $SRC_NAME 正挂在节点 $send_pin 上，发送端固定到这个节点"
+    fi
+fi
+
+if [ "$DST_KIND" = node ]; then
+    dpod=$(k get pods -n "$DNS" -l "$SEL" --field-selector "spec.nodeName=$DST_NAME" \
+        -o 'jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}' | head -n 1)
+    [ -n "$dpod" ] || die "节点 $DST_NAME 上没有 ibsend daemon（命名空间 $DNS，选择器 $SEL）"
+    line=$(read_ready "$DNS" "$dpod") || die "daemon $dpod 还没就绪（读不到 /run/ibsend/ready）"
+    addr=$(json_field "$line" bind)
+    dport=$(json_field "$line" port)
+    check_addr "$addr" "$dport" "daemon $dpod"
+    say "目标：节点 $DST_NAME 上的 $dpod（$addr:$dport）${PREFIX:+，子目录 $PREFIX}"
+else
+    recv_pin=$(pvc_node "$DST_NAME")
+    if [ -n "$recv_pin" ]; then
+        say "目标 PVC $DST_NAME 正挂在节点 $recv_pin 上，接收端固定到这个节点"
+    fi
+    apply recv_manifest "$recv_pin"
+    say "等待接收端 $RECV_POD 就绪…"
+    wait_ready "$RECV_POD" || exit 1
+    line=$(read_ready "$NS" "$RECV_POD") || die "读不到接收端 $RECV_POD 的就绪文件"
+    addr=$(json_field "$line" bind)
+    dport=$(json_field "$line" port)
+    check_addr "$addr" "$dport" "接收端 $RECV_POD"
+    say "接收端就绪：$addr:$dport → pvc/$DST_NAME:$RECV_OUT"
+    # 同一个 PVC 读写两头时，两个 Pod 必须在同一节点上才挂得上
+    if [ -z "$send_pin" ] && [ "$SRC_KIND" = pvc ] && [ "$SRC_NAME" = "$DST_NAME" ]; then
+        send_pin=$(k get pod -n "$NS" "$RECV_POD" -o 'jsonpath={.spec.nodeName}')
+    fi
+fi
+
+apply send_manifest "$send_pin" "$addr" "$dport"
+say "等待发送端 $SEND_POD 启动…"
+wait_started "$SEND_POD" || exit 1
+follow_logs "$SEND_POD"
+rc=$(wait_done "$SEND_POD")
+
+if [ "$DST_KIND" = pvc ]; then
+    if [ "$rc" -ne 0 ]; then
+        say "$PROG: 发送端失败（退出码 $rc），接收端日志："
+        k logs -n "$NS" "$RECV_POD" --tail=20 >&2 || true
+        exit "$rc"
+    fi
+    say "发送完成，等待接收端落盘和校验…"
+    rrc=$(wait_done "$RECV_POD")
+    if [ "$JSON" = 1 ]; then
+        k logs -n "$NS" "$RECV_POD" 2>/dev/null |
+            sed -e '/^{"event":"progress"/d' -e '/^{"event":"ready"/d' | tag_json receiver || true
+    else
+        k logs -n "$NS" "$RECV_POD" --tail=20 >&2 || true
+    fi
+    if [ "$rrc" -ne 0 ]; then
+        say "$PROG: 接收端失败（退出码 $rrc）"
+        exit "$rrc"
+    fi
+fi
+if [ "$rc" -ne 0 ]; then
+    say "$PROG: 发送端失败（退出码 $rc）"
+fi
+exit "$rc"

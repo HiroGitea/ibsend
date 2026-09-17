@@ -32,6 +32,7 @@ pub mod crc;
 pub mod daemon;
 pub mod discover;
 mod ffi;
+pub mod json;
 pub mod proto;
 pub mod recv;
 pub mod send;

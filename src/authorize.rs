@@ -16,6 +16,9 @@
 //!
 //! 分发时更好的做法是在安装包的 post-install 里做 setcap（见 README），
 //! 这个运行时流程是给「直接跑构建产物」的人兜底的。
+//!
+//! 容器里这一套都不适用：能力由运行时的边界集决定，要在 Docker / Kubernetes
+//! 那一侧配置，所以只给出配置提示（见 [`container_hint`]）。
 
 use std::ffi::CString;
 use std::io;
@@ -28,7 +31,7 @@ pub enum Method {
     Polkit,
     /// 无头但有终端，让 sudo 在终端里问密码
     Sudo,
-    /// 两条都不通，只能让人手动执行
+    /// 两条都不通（或者在容器里），只能让人手动处理
     Manual,
 }
 
@@ -52,8 +55,47 @@ pub fn self_path() -> io::Result<PathBuf> {
     std::fs::read_link("/proc/self/exe")
 }
 
-/// 需要用户手动执行的命令，无法弹框时显示给他
+/// 是不是跑在容器里。
+///
+/// 容器里给二进制 setcap 没有意义：改动留在容器的可写层，重建就没了；能力能不能
+/// 生效也取决于运行时给的边界集。这些都得在编排侧配置。
+pub fn in_container() -> bool {
+    use std::path::Path;
+    Path::new("/.dockerenv").exists()
+        || Path::new("/run/.containerenv").exists() // podman
+        || std::env::var_os("KUBERNETES_SERVICE_HOST").is_some()
+        || std::env::var_os("container").is_some() // systemd 的约定，podman/nspawn 会设
+        || std::fs::read_to_string("/proc/1/cgroup").is_ok_and(|s| {
+            ["docker", "kubepods", "containerd", "libpod"].iter().any(|k| s.contains(k))
+        })
+}
+
+/// 本进程是否带着 no_new_privs。带着它时 execve 不会授予文件能力，
+/// 非 root 用户靠镜像里的 setcap 拿 CAP_IPC_LOCK 这条路就断了。
+fn no_new_privs() -> bool {
+    std::fs::read_to_string("/proc/self/status").is_ok_and(|s| {
+        s.lines().any(|l| l.split_whitespace().eq(["NoNewPrivs:", "1"]))
+    })
+}
+
+/// 容器里怎么解除 memlock 限制
+pub fn container_hint() -> String {
+    let mut s = String::from(
+        "容器里要由运行时授予 IPC_LOCK：Docker 加 `--cap-add IPC_LOCK`，\
+         Kubernetes 在 securityContext.capabilities.add 里加 IPC_LOCK",
+    );
+    if no_new_privs() {
+        s += "；当前进程带着 no_new_privs，非 root 时文件能力不会生效——\
+              去掉 `--security-opt no-new-privileges`，或把 allowPrivilegeEscalation 设为 true";
+    }
+    s
+}
+
+/// 需要用户手动执行的命令，无法弹框时显示给他。容器里是一段配置提示。
 pub fn manual_command() -> String {
+    if in_container() {
+        return container_hint();
+    }
     match self_path() {
         Ok(p) => format!("sudo setcap cap_ipc_lock+ep {}", p.display()),
         Err(_) => "sudo setcap cap_ipc_lock+ep <ibsend 的路径>".into(),
@@ -109,7 +151,7 @@ fn has_display() -> bool {
 
 /// 这台机器上该用哪种方式要授权
 pub fn method() -> Method {
-    if which("setcap").is_none() {
+    if in_container() || which("setcap").is_none() {
         return Method::Manual; // 连 setcap 都没有，给命令让人自己想办法
     }
     if has_display() && which("pkexec").is_some() {

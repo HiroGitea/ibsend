@@ -29,6 +29,18 @@ Tests that exercise the real transfer path require two RDMA-capable hosts.
 Unit tests cover the protocol, path handling, adaptive tuning and CRC code and
 can run without establishing an RDMA connection.
 
+Changes to the container and Kubernetes files should also pass:
+
+```sh
+docker build -t ibsend .
+helm lint deploy/helm/ibsend
+shellcheck deploy/docker/entrypoint.sh contrib/kubectl-ibsend
+```
+
+The manifests in `deploy/kubernetes/ibsend-*.yaml` are rendered from the Helm
+chart. Regenerate them with `deploy/kubernetes/render.sh` when changing the
+chart.
+
 ## Pull requests
 
 - Keep changes focused and explain the problem they solve.

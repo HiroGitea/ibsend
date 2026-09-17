@@ -45,8 +45,7 @@ pub fn send_files<F: FnMut(Progress)>(
         files.push(Entry { name: it.name.clone(), size: md.len() });
     }
     // 把本机还能 pin 多少告诉对端，让它挑一个双方都放得下的 slab 尺寸。
-    // 留 1/8 给 CQ/QP 和控制通道自己的缓冲，它们同样计入 memlock。
-    let budget = tune::memlock_headroom().map(|h| h - h / 8).unwrap_or(0);
+    let budget = tune::pin_budget();
     let manifest = Manifest { files, sender_budget: budget };
 
     // 只重试「对端还没就位」这一类；本地资源问题立刻报错，否则一个必然失败的
@@ -101,8 +100,8 @@ pub fn send_files<F: FnMut(Progress)>(
 
     let armed = if budget > 0 && need > budget {
         Err(format!(
-            "memlock 剩余 {:.1} MB，装不下 2 个 {:.1} MB 的块（对齐后要 {:.1} MB）；\
-             放开 memlock 见 contrib/99-rdma.conf",
+            "可锁定内存剩余 {:.1} MB，装不下 2 个 {:.1} MB 的块（对齐后要 {:.1} MB）；\
+             放开 memlock 见 contrib/99-rdma.conf，容器里还要检查内存限额",
             budget as f64 / 1048576.0, slab as f64 / 1048576.0, need as f64 / 1048576.0))
     } else if unsafe {
         ffi::ibx_send_arm(x, slab, local_slabs, reply.pool_addr, reply.pool_rkey,

@@ -1,0 +1,143 @@
+# 场景：把一份数据集从共享存储（PVC）预热到每个 IB 节点的本地盘。
+#
+# 前提：
+#   - 各节点跑着 ibsend daemon（Helm chart，storage.type=hostPath），
+#     数据会落在各节点的 /var/lib/ibsend/inbox/datasets/<DATASET>/
+#   - 数据集在 PVC datasets 里，路径是 /<DATASET>/...
+#   - namespace 允许 privileged（见 ../namespace.yaml），镜像地址改成你推送的那个
+#
+# 训练 Pod 之后用 hostPath 读本地副本即可，例如：
+#   volumes:
+#     - name: imagenet
+#       hostPath:
+#         path: /var/lib/ibsend/inbox/datasets/imagenet
+#         type: Directory
+#
+# Job 用 `ibsend discover --json` 找出所有在线的 daemon（hostNetwork 下也包括本节点），
+# 按 TARGETS 这个正则过滤发现名（默认是节点名），分批并行发送，任何一个失败都会
+# 让 Job 失败。重跑是安全的：已经完整存在的文件按大小跳过，.part 会续传。
+#
+# 切换到 Multus：删掉 hostNetwork 和 dnsPolicy，在 Pod 模板的 metadata 里加
+#   annotations:
+#     k8s.v1.cni.cncf.io/networks: ipoib-network
+# 此时 daemon 也要用 Multus 模式，发现只能找到同一网络里的 Pod。
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dataset-prewarm
+  namespace: ibsend
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dataset-prewarm
+    spec:
+      restartPolicy: Never
+      # rdma_cm 按 IP 找 HCA，Pod 的网络命名空间里必须有 IPoIB 接口
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      automountServiceAccountToken: false
+      securityContext:
+        # 要能读数据集里的文件；属主不是这个 UID 时改成对应的值
+        runAsUser: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: prewarm
+          image: ibsend:0.1.0
+          env:
+            # /datasets 下要预热的目录
+            - name: DATASET
+              value: imagenet
+            # 只发给发现名匹配这个扩展正则的 daemon，例如 '^gpu-'
+            - name: TARGETS
+              value: "."
+            # 同时发送的节点数
+            - name: MAX_PARALLEL
+              value: "4"
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -u
+              src="/datasets/$DATASET"
+              if [ ! -e "$src" ]; then
+                  echo "找不到 $src" >&2
+                  exit 1
+              fi
+
+              # 每行一个 JSON 事件；peer 事件的字段顺序固定为 event、name、addr
+              events=$(ibsend discover --json) || exit $?
+              peers=$(printf '%s\n' "$events" \
+                  | sed -n 's/^{"event":"peer","name":"\([^"]*\)","addr":"\([^"]*\)".*/\1 \2/p' \
+                  | awk -v re="$TARGETS" '$1 ~ re')
+              if [ -z "$peers" ]; then
+                  echo "没有发现名匹配 $TARGETS 的 ibsend daemon" >&2
+                  exit 4
+              fi
+              echo "目标："
+              printf '%s\n' "$peers" | sed 's/^/  /'
+
+              failed=0
+              batch=""
+              # 等这一批全部结束，带上节点名打印各自的输出
+              finish_batch() {
+                  for job in $batch; do
+                      name=${job%:*}
+                      pid=${job##*:}
+                      if wait "$pid"; then rc=0; else rc=$?; fi
+                      sed "s/^/[$name] /" "/tmp/$name.log"
+                      if [ "$rc" -ne 0 ]; then
+                          echo "[$name] 失败，退出码 $rc" >&2
+                          failed=$((failed + 1))
+                      fi
+                  done
+                  batch=""
+              }
+
+              n=0
+              while read -r name addr; do
+                  ibsend send --prefix datasets "$addr" "$src" > "/tmp/$name.log" 2>&1 &
+                  batch="$batch $name:$!"
+                  n=$((n + 1))
+                  if [ $((n % MAX_PARALLEL)) -eq 0 ]; then
+                      finish_batch
+                  fi
+              done <<EOF
+              $peers
+              EOF
+              finish_batch
+
+              if [ "$failed" -ne 0 ]; then
+                  echo "$failed 个节点失败" >&2
+                  exit 1
+              fi
+              echo "$n 个节点全部完成"
+          securityContext:
+            # 必须为 true：ibsend 靠文件能力拿 IPC_LOCK，no_new_privs 会让它失效
+            allowPrivilegeEscalation: true
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+              add: [IPC_LOCK]
+          resources:
+            limits:
+              # 每个发送进程最多 pin 约 256 MiB 的本地缓冲，
+              # 至少给 MAX_PARALLEL × 256Mi，再留些余量
+              memory: 2Gi
+              rdma/hca_shared_devices_a: 1
+          volumeMounts:
+            - name: datasets
+              mountPath: /datasets
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: datasets
+          persistentVolumeClaim:
+            claimName: datasets
+            readOnly: true
+        - name: tmp
+          emptyDir: {}
